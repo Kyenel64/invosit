@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
@@ -13,11 +14,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	defaultKratosURL = "http://127.0.0.1:8000/kratos"
-	defaultAPIURL    = "http://127.0.0.1:8000"
-	defaultUIURL     = "http://127.0.0.1:8000"
-)
+var defaultBaseURL = "http://127.0.0.1:8000" // override in env
+
+func baseURL() string {
+	if v := os.Getenv("INVOSIT_BASE_URL"); v != "" {
+		return v
+	}
+	return defaultBaseURL
+}
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
@@ -28,14 +32,19 @@ var loginCmd = &cobra.Command{
 			return fmt.Errorf("failed to create new filestore: %w", err)
 		}
 
-		token, err := runBrowserLogin(cmd.Context(), defaultKratosURL, cmd.ErrOrStderr())
+		base := baseURL()
+		kratosURL := base + "/kratos"
+		apiURL := base
+		uiURL := base
+
+		token, err := runBrowserLogin(cmd.Context(), kratosURL, uiURL, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
 
 		// Check we got a valid session token and user exists in invosit db.
 		// We also need this to get our email and user id.
-		apiClient := apiclient.NewClient(defaultAPIURL)
+		apiClient := apiclient.NewClient(apiURL)
 		user, err := apiClient.Me(cmd.Context(), token)
 		if err != nil {
 			if errors.Is(err, apiclient.ErrUnauthorized) {
@@ -50,8 +59,8 @@ var loginCmd = &cobra.Command{
 			Email:        user.Email,
 			UserID:       user.ID,
 			SessionToken: token,
-			KratosURL:    defaultKratosURL,
-			APIURL:       defaultAPIURL,
+			KratosURL:    kratosURL,
+			APIURL:       apiURL,
 			SavedAt:      time.Now(),
 		})
 		if err != nil {
@@ -67,10 +76,10 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 }
 
-func runBrowserLogin(ctx context.Context, kratosURL string, stderr io.Writer) (string, error) {
+func runBrowserLogin(ctx context.Context, kratosURL, uiURL string, stderr io.Writer) (string, error) {
 	client := kratos.NewClient(kratosURL)
 	token, err := client.BrowserLogin(ctx, kratos.BrowserLoginOpts{
-		UIBaseURL: defaultUIURL,
+		UIBaseURL: uiURL,
 		Stderr:    stderr,
 	})
 	if err != nil {
