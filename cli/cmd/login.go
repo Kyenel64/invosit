@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	defaultKratosURL = "http://localhost:4433"
-	defaultAPIURL    = "http://localhost:8080"
-	defaultUIURL     = "http://127.0.0.1:5173"
+	defaultKratosURL = "http://127.0.0.1:8000/kratos"
+	defaultAPIURL    = "http://127.0.0.1:8000"
+	defaultUIURL     = "http://127.0.0.1:8000"
 )
 
 var loginCmd = &cobra.Command{
