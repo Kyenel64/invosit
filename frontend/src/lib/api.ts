@@ -1,6 +1,5 @@
 
-const API_URL = "http://127.0.0.1:8080";
-const API_BASE = `${API_URL}/api/v1`;
+const API_BASE = "/api/v1";
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {

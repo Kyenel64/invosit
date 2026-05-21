@@ -1,5 +1,5 @@
 
-const KRATOS_URL = "http://127.0.0.1:4433";
+const KRATOS_URL = "/kratos";
 
 export const LOGIN_BROWSER_INIT = `${KRATOS_URL}/self-service/login/browser`;
 
