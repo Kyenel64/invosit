@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
+	"github.com/kyenel64/invosit/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -22,15 +22,26 @@ var initCmd = &cobra.Command{
 		workspaces, err := apiClient.GetWorkspaces(cmd.Context(), creds.SessionToken)
 		if err != nil {
 			if errors.Is(err, apiclient.ErrUnauthorized) {
-				return errors.New("Unauthorized request to GET /workspaces")
+				return errors.New("not logged in or session expired. run `invosit login` to authenticate")
 			}
 			return err
 		}
-
-		out := cmd.OutOrStdout()
-		for _, workspace := range workspaces {
-			fmt.Fprintf(out, "- %s\n", workspace.Name)
+		if len(workspaces) == 0 {
+			return errors.New("you don't have access to any workspaces")
 		}
+
+		labels := make([]string, len(workspaces))
+		for i, workspace := range workspaces {
+			labels[i] = workspace.Name
+		}
+		selectedIdx, err := tui.Select("Select a workspace:", labels)
+		if err != nil {
+			return err
+		}
+		_ = workspaces[selectedIdx]
+
+		// TODO: list envs via apiClient.GetEnvironments(ctx, token, chosen.ID),
+		// run tui.Select on env names, then write the manifest.
 
 		return nil
 	},
