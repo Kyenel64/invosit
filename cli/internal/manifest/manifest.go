@@ -15,20 +15,12 @@ const (
 	DefaultName = ".invosit.yaml"
 
 	workspaceIDPrefix = "ws_"
-	fileIDPrefix      = "file_"
 )
 
 type Manifest struct {
 	Version     int    `yaml:"version"`
 	WorkspaceID string `yaml:"workspace_id"`
 	Environment string `yaml:"environment"`
-	Files       []File `yaml:"files"`
-}
-
-type File struct {
-	Path        string `yaml:"path"`
-	FileID      string `yaml:"file_id"`
-	ContentHash string `yaml:"content_hash"`
 }
 
 var ErrNotFound = errors.New("invosit manifest not found")
@@ -88,20 +80,6 @@ func (m *Manifest) Validate() error {
 	}
 	if m.Environment == "" {
 		return errors.New("environment must not be empty")
-	}
-
-	seen := make(map[string]struct{}, len(m.Files))
-	for i, f := range m.Files {
-		if f.Path == "" {
-			return fmt.Errorf("files[%d]: path must not be empty", i)
-		}
-		if !strings.HasPrefix(f.FileID, fileIDPrefix) {
-			return fmt.Errorf("files[%d]: file_id must start with %q", i, fileIDPrefix)
-		}
-		if _, dup := seen[f.Path]; dup {
-			return fmt.Errorf("files[%d]: duplicate path %q", i, f.Path)
-		}
-		seen[f.Path] = struct{}{}
 	}
 	return nil
 }
