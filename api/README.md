@@ -32,15 +32,10 @@ Compose brings up:
 | `api` | `8080` | The Go API server |
 | `kratos` | `4433` | Kratos public API (admin on `4434`, not host-exposed). Migrations idempotent. |
 | `postgres` | `5432` | Hosts both `invosit` and `kratos` databases |
-| `redis` | `6379` | Cache / rate limiting |
+| `redis` | `6379` | Provisioned for planned rate limiting; not yet wired into the API process |
+| `frontend` | `5173` | Invosit frontend + dashboard |
 
-MVP runs Kratos as JSON-API only — no self-service UI, no SMTP/courier.
-The CLI talks to Kratos directly via the native API flow. Email
-verification and password recovery are disabled in `kratos.yml` until
-there's a courier and a UI to host the flows.
-
-Migrations run automatically on startup. API docs available at
-`http://localhost:8080/docs`.
+Migrations run automatically on startup.
 
 
 ## Commands
@@ -60,13 +55,12 @@ CI runs all four on every PR (with `working-directory: api`), plus
 
 ## Configuration
 
-All config via environment variables — `.env` lives at the repo root and is
+All config via environment variables.  `.env` lives at the repo root and is
 consumed by both `docker compose` and the API process.
 
 ```bash
 # Server
 PORT=8080
-ENV=development
 
 # Ory Kratos — set all four secrets per Ory's production guide
 # https://www.ory.com/docs/kratos/guides/production
@@ -80,9 +74,6 @@ KRATOS_CIPHER_SECRET=            # exactly 32 chars
 
 # Postgres (single container, two logical databases: invosit + kratos)
 DATABASE_URL=postgres://invosit:secret@localhost:5432/invosit
-
-# Redis
-REDIS_URL=redis://localhost:6379
 
 # Storage — pick one provider
 STORAGE_PROVIDER=r2
@@ -152,20 +143,23 @@ The CLI uses Kratos's native API flow (Bearer tokens). The web frontend
 will use Kratos's browser flow (cookies). Both land at the same
 `/sessions/whoami` validation server-side.
 
-### Rate limiting
+### Rate limiting (planned, not yet wired)
 
+When implemented, will be Redis-backed (Redis is already in compose):
 - API endpoints: 300 requests/minute per IP
 - File push: 60 requests/minute per IP
-- Login / registration brute-force is rate-limited by Kratos itself (configured in `api/kratos/kratos.yml`)
+
+Login / registration brute-force is already rate-limited by Kratos itself
+(configured in `api/kratos/kratos.yml`).
 
 ### Signed storage URLs
 
 Download URLs expire in 15 minutes and are only issued after auth and
 wrapped-DEK verification pass. The server never proxies file content.
 
-### Security headers
+### Security headers (planned, not yet wired)
 
-Every API response includes:
+When implemented, every API response will include:
 ```
 X-Content-Type-Options: nosniff
 X-Frame-Options: DENY
@@ -191,7 +185,7 @@ api/
 ├── internal/
 │   ├── kratos/             # thin Kratos client (whoami)
 │   ├── handler/            # net/http handlers, one file per resource group
-│   ├── middleware/         # Kratos session, rate limiting, security headers, logging
+│   ├── middleware/         # Recovery, CORS, Logger, BodyLimit, Kratos session, workspace + environment scoping (rate limiting + security headers planned)
 │   ├── httpx/              # JSON bind/respond helpers, request ctx
 │   ├── ids/                # prefixed ID generator
 │   ├── db/                 # Postgres connection helpers
@@ -214,8 +208,6 @@ The API runs as a Docker container behind Nginx Proxy Manager on a VPS.
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
-
-Add a proxy host in Nginx Proxy Manager pointing at port `8080`.
 
 ### Calibrate Argon2 on the target host
 

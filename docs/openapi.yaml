@@ -10,9 +10,9 @@ info:
     name: Invosit
 
 servers:
-  - url: https://api.invosit.com/v1
+  - url: https://api.invosit.com/api/v1
     description: Production
-  - url: http://localhost:8080/v1
+  - url: http://localhost:8080/api/v1
     description: Local development
 
 tags:
@@ -74,9 +74,12 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Workspace"
+                type: object
+                properties:
+                  workspaces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Workspace"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -159,9 +162,12 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Member"
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Member"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -188,8 +194,8 @@ paths:
                   example: teammate@example.com
                 role:
                   type: string
-                  enum: [admin, developer, viewer]
-                  example: developer
+                  enum: [admin, member, viewer, no_access]
+                  example: member
       responses:
         "201":
           description: Member invited
@@ -494,9 +500,12 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/AccessGrant"
+                type: object
+                properties:
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AccessGrant"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -740,8 +749,8 @@ components:
           example: teammate@example.com
         role:
           type: string
-          enum: [admin, developer, viewer]
-          example: developer
+          enum: [admin, member, viewer, no_access]
+          example: member
         joined_at:
           type: string
           format: date-time

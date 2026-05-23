@@ -32,8 +32,8 @@ This repo (`github.com/kyenel64/invosit`) is a monorepo holding three product co
 | Component | Location | Status |
 |---|---|---|
 | **API server** | `api/` (Go) | shipping — most of this file describes it |
-| **CLI** | `cli/` (Go) | login only — file sync not yet built (see "The CLI" section below) |
-| **Frontend** | `frontend/` (web dashboard, planned) | not yet built — see "The frontend" section below for intent |
+| **CLI** | `cli/` (Go) | login + init shipped; push/pull and encryption planned (see "The CLI" section below) |
+| **Frontend** | `frontend/` (Vite + React + TS) | basic Kratos login page shipped; dashboard features planned (see "The frontend" section below) |
 | **Documentation** | `docs/` | shared between all clients |
 
 Each component is self-contained under its own top-level directory: its own
@@ -76,7 +76,7 @@ The API never sees plaintext file content. Ever.
 | Validation | `go-playground/validator/v10` (struct tags) |
 | Identity / auth | Ory Kratos (self-hosted, separate container) |
 | Database | Postgres |
-| Cache / rate limiting | Redis |
+| Cache / rate limiting | Redis (provisioned in compose; not yet wired in code — planned for rate limiting) |
 | Blob storage | Pluggable — R2 (default), S3, GCS (planned) |
 | Containerisation | Docker Compose |
 | Reverse proxy | Nginx Proxy Manager (external, already running on VPS) |
@@ -116,14 +116,14 @@ invosit/                          # monorepo root
 │   ├── go.sum
 │   ├── Dockerfile
 │   └── .golangci.yml
-├── cli/                          # Go CLI — login shipped; encryption + file sync planned
-├── frontend/                     # web dashboard (planned)
+├── cli/                          # Go CLI — login + init shipped; push/pull and encryption planned
+├── frontend/                     # Vite + React + TS — basic Kratos login shipped
 ├── docs/
 │   └── openapi.yaml              # OpenAPI 3.0 spec — shared by API + CLI + frontend
-└── docker-compose.yml            # dev orchestration: API + Postgres + Redis + Kratos
+└── docker-compose.yml            # dev orchestration: API + Postgres + Redis + Kratos + Frontend
 ```
 
-Future `cli/` and `frontend/` get their own `go.mod` / `package.json` and
+`cli/` and `frontend/` have their own `go.mod` / `package.json` and
 build artifacts inside their own directories — they do **not** share Go
 imports with `api/internal/`, which is blocked at compile time by the
 `internal/` rule.
@@ -151,19 +151,20 @@ mux.HandleFunc("POST /internal/hooks/kratos/after-registration", h.AfterRegistra
 // Authenticated — wrap individual handlers with Kratos session middleware
 authed := middleware.RequireKratosSession(kc, db)
 mux.Handle("GET  /api/v1/auth/me",    authed(http.HandlerFunc(h.Me)))
-mux.Handle("GET  /api/v1/workspaces", authed(http.HandlerFunc(h.workspace.List)))
-mux.Handle("POST /api/v1/workspaces", authed(http.HandlerFunc(h.workspace.Create)))
+mux.Handle("GET  /api/v1/workspaces", authed(http.HandlerFunc(h.ListWorkspaces)))
+mux.Handle("POST /api/v1/workspaces", authed(http.HandlerFunc(h.CreateWorkspace)))
 
 // Workspace-scoped — Kratos session + workspace membership
-wsmw := middleware.Compose(authed, middleware.WorkspaceMember(db))
-mux.Handle("GET    /api/v1/workspaces/{workspaceId}",         wsmw(http.HandlerFunc(h.workspace.Get)))
-mux.Handle("DELETE /api/v1/workspaces/{workspaceId}",         wsmw(http.HandlerFunc(h.workspace.Delete)))
-mux.Handle("GET    /api/v1/workspaces/{workspaceId}/members", wsmw(http.HandlerFunc(h.members.List)))
+wsMember := middleware.Chain(authed, middleware.WorkspaceMember(db))
+mux.Handle("GET    /api/v1/workspaces/{workspaceId}",              wsMember(http.HandlerFunc(h.GetWorkspace)))
+mux.Handle("DELETE /api/v1/workspaces/{workspaceId}",              wsMember(http.HandlerFunc(h.DeleteWorkspace)))
+mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments", wsMember(http.HandlerFunc(h.ListEnvironments)))
 // ... etc
 
 // Global middleware — outermost first
 chain := middleware.Chain(
     middleware.Recovery,
+    middleware.CORS(middleware.CORSConfig{AllowedOrigins: corsOrigins}),
     middleware.Logger,
     middleware.BodyLimit(10 << 20),
 )
@@ -184,8 +185,7 @@ Handlers receive dependencies via a struct — no global state:
 type Handler struct {
     db         *sql.DB
     kratos     *kratos.Client
-    storage    storage.Storage
-    redis      *redis.Client
+    blobs      storage.Storage
     webhookKey string
 }
 ```
@@ -314,13 +314,20 @@ Built on Cobra; structured the same way as the API server with thin
   https://www.ory.com/docs/kratos/social-signin/native-apps.
 - **`invosit user get`** — prints the local user id + email from the saved
   credentials.
+- **`invosit init`** — binds the current directory to a `(workspace, environment)`
+  pair via an interactive Bubbletea picker (`internal/tui`) and writes a
+  YAML manifest at `.invosit.yaml`. If a manifest already exists, prompts
+  to overwrite via the same picker. Mirrors `git init` (binding only — no
+  data fetched).
 - **Credentials at rest** — `credstore.FileStore` writes
   `<user-config-dir>/invosit/credentials.json` at `0600` via a
   write-temp-then-rename atomic swap, and refuses to load files with
   group/other bits set (POSIX only).
-- **API client** — `internal/apiclient` calls `/auth/me` to verify the
-  session token before saving credentials; this is the only API surface
-  the CLI talks to today.
+- **Manifest** — `internal/manifest` loads/saves `.invosit.yaml`,
+  validates `version`, `workspace_id` prefix, `environment` non-empty, and
+  `file_id` prefixes for any future file entries.
+- **API client** — `internal/apiclient` exposes `Me`, `GetWorkspaces`, and
+  `GetEnvironments` over Bearer-token auth.
 
 The loopback port is fixed at `33405` and listed in `kratos.yml`'s
 `allowed_return_urls`. Kratos's URL matcher doesn't accept port wildcards,
@@ -333,15 +340,15 @@ login through the CLI is not a planned feature.
 
 ### Planned
 
+- **`invosit push` / `invosit pull`.** Populate the manifest's `files` list, hash file contents, and upload/download blobs against signed URLs from the API. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
 - **Encryption boundary.** All AES-256-GCM encryption/decryption of file contents happens here, not in the API. Generates per-file DEKs and wraps each with the recipient's public key (sourced from `users.public_key` via the API).
-- **Manifest management.** Reads and writes `.invosit.yaml` in the working directory — the file committed to git that lists which files belong to the workspace, their paths, and current content hashes.
 - **Storage I/O.** Uploads/downloads encrypted blobs **directly** to the storage provider using short-lived signed URLs issued by the API. Bytes never pass through the API server.
 - **Local key material.** Generates and stores the user's keypair locally; the public key gets registered with the API on first run, the private key never leaves the machine.
 
 ### Shared with the API
 
 - `docs/openapi.yaml` — single source of truth for request/response shapes. The CLI generates or hand-writes a client off this; the API serves it.
-- ID prefix conventions (`ws_`, `usr_`, `file_`, `ver_`, `grant_`, `log_`).
+- ID prefix conventions emitted by `api/internal/ids`: `usr_`, `ws_`, `env_`, `file_`, `ver_`, `tok_`. `grant_` and `log_` are planned.
 - Error code stability — the API returns short stable codes (`NOT_FOUND`, `INVALID_REQUEST`, etc.) that the CLI maps to user-facing messages.
 - Both clients wrap Ory's `client-go` SDK in a thin local package
   (`api/internal/kratos` and `cli/internal/kratos`) so the SDK surface
@@ -351,9 +358,20 @@ login through the CLI is not a planned feature.
 
 ## The frontend
 
-Not yet built. When it lands it will live in `frontend/` in this repo.
+> All paths in this section are relative to `frontend/` unless otherwise noted.
 
-### Scope (intended)
+Lives in `frontend/` with its own `package.json`. Vite + React 18 +
+TypeScript + Tailwind, routed with TanStack Router and data-fetched with
+TanStack Query. Dev server runs on `:5173` (referenced from the CLI's
+loopback login flow).
+
+### Today
+
+- **Kratos login page**: handles the browser side of the CLI's
+  exchange-code OIDC flow (the page the CLI opens to drive sign-in). See
+  `frontend/README.md` for run instructions.
+
+### Planned
 
 - Workspace and member management — create workspaces, invite/remove
   members, manage roles.
@@ -375,9 +393,6 @@ Not yet built. When it lands it will live in `frontend/` in this repo.
 
 - `docs/openapi.yaml` — same contract the CLI uses; the frontend's API
   client is generated or hand-written off this.
-
-Tech stack will be picked when work on this component starts; until then
-treat this section as a scope/boundary note.
 
 ---
 
@@ -418,8 +433,9 @@ compromised, files remain encrypted and unreadable.
   `return_session_token_exchange_code=true` and a loopback redirect for the
   browser detour only those methods need. The API server is unaffected —
   it just keeps validating Bearer tokens
-- No Redis caching of session validity — Kratos is the single source of
-  truth (revisit if whoami latency becomes a bottleneck)
+- No caching of session validity today — Kratos is the single source of
+  truth on every request. If `/sessions/whoami` latency becomes a bottleneck,
+  Redis is provisioned in compose and ready to be wired in.
 
 ### Authorization — four layers
 
@@ -441,7 +457,8 @@ validated end-to-end. Encryption + wrapped DEKs land in M4; until then layers
 
 ### Rate limiting
 
-Redis-backed, per IP, applied to API routes:
+**Planned, not yet wired.** When implemented, it will be Redis-backed
+(Redis is already in compose), per IP, applied to API routes:
 
 - File push: **60 req/min**
 - All other endpoints: **300 req/min**
@@ -545,17 +562,20 @@ Development: allow localhost. Never use wildcard `*` in production.
 All middleware is `func(http.Handler) http.Handler`. Outermost runs first;
 `middleware.Chain(A, B, C)(h)` produces `A(B(C(h)))`.
 
-Global (wraps the entire mux):
+Global (wraps the entire mux, see `api/cmd/server/main.go`):
 1. **Recovery** — catch panics, return 500, log stack trace server-side only
-2. **Logger** — log method, path, status, duration, userID, IP — never bodies; sets `X-Request-ID`
-3. **SecurityHeaders** — set all security response headers
-4. **RateLimiter** — Redis per-IP, stricter on auth routes
-5. **BodyLimit** — `http.MaxBytesReader` at 10MB
+2. **CORS** — applies `CORS_ALLOWED_ORIGINS` to preflight and actual requests
+3. **Logger** — log method, path, status, duration, userID, IP — never bodies; sets `X-Request-ID`
+4. **BodyLimit** — `http.MaxBytesReader` at 10MB
+
+Planned global layers (not yet wired):
+- **SecurityHeaders** — set security response headers (HSTS, CSP, X-Content-Type-Options, etc.)
+- **RateLimiter** — Redis per-IP, stricter on auth routes
 
 Per-route (wraps specific handlers):
-6. **RequireKratosSession** — validate the Bearer token / Kratos cookie via `/sessions/whoami`, look up the local user, attach `userID` to request context
-7. **WorkspaceMember** — verify membership for `{workspaceId}` (workspace routes only)
-8. **EnvironmentScoped** — verify `{environmentId}` belongs to the workspace from layer 7, attach `environmentID` to context (file routes only)
+5. **RequireKratosSession** — validate the Bearer token / Kratos cookie via `/sessions/whoami`, look up the local user, attach `userID` to request context
+6. **WorkspaceMember** — verify membership for `{workspaceId}` (workspace routes only)
+7. **EnvironmentScoped** — verify `{environmentId}` belongs to the workspace from layer 6, attach `environmentID` to context (file routes only)
 
 ---
 
@@ -603,7 +623,6 @@ R2 and S3 share one implementation — R2 is S3-compatible, different endpoint
 ```bash
 # Server
 PORT=8080
-ENV=production                  # production | development
 
 # Ory Kratos — set all three secrets per Ory's production guide
 # (the v1.3 config schema only accepts default/cookie/cipher under
@@ -617,9 +636,6 @@ KRATOS_CIPHER_SECRET=           # exactly 32 chars (e.g. openssl rand -hex 16)
 
 # Postgres (one container hosts two databases: invosit + kratos)
 DATABASE_URL=postgres://invosit:secret@postgres:5432/invosit
-
-# Redis
-REDIS_URL=redis://redis:6379
 
 # Storage
 STORAGE_PROVIDER=r2             # r2 | s3 (gcs planned, not yet implemented)
@@ -664,7 +680,7 @@ error server-side with request ID for tracing.
 These apply across the monorepo. API-specific conventions are noted as such.
 
 - **API:** stdlib `net/http` only — no third-party router or web framework
-- **API:** `http.ServeMux` 1.22+ patterns: `"POST /api/v1/auth/register"`, `"GET /workspaces/{id}"`
+- **API:** `http.ServeMux` 1.22+ patterns: `"POST /api/v1/workspaces"`, `"GET /api/v1/workspaces/{workspaceId}"`
 - **API:** all middleware is `func(http.Handler) http.Handler`; compose with `middleware.Chain`
 - **API:** decode + validate request bodies via `httpx.Bind` (rejects unknown JSON fields)
 - **API:** read user ID / request ID from `r.Context()` via `httpx` accessors — never globals
@@ -672,12 +688,11 @@ These apply across the monorepo. API-specific conventions are noted as such.
 - `database/sql` directly — no ORM, parameterised queries only
 - Migrations: numbered SQL files (`001_init.sql`, `002_add_environments.sql`)
 - Timestamps: UTC always
-- IDs: prefixed strings (`ws_`, `usr_`, `file_`, `ver_`, `grant_`, `log_`)
-  generated with a small random helper — not UUIDs, not sequential integers
+- IDs: prefixed strings generated by `api/internal/ids` — not UUIDs, not sequential integers.
+  Shipped prefixes: `usr_`, `ws_`, `env_`, `file_`, `ver_`, `tok_`. Planned for future resources: `grant_` (access grants), `log_` (audit logs).
 - Return 403 not 404 for unauthorised access to existing resources
 - Validate all input at handler level before DB interaction
 - Comments: write none by default. Only add one when the WHY is non-obvious (hidden constraint, subtle invariant, workaround for a specific bug). Don't explain WHAT the code does; well-named identifiers cover that. Don't reference the current task, fix, or callers ("added for X flow", "used by Y caller"). When a comment is needed, prefer one short line.
-- No em dashes (`—`) anywhere. Use periods, commas, parens, or colons instead.
 
 ---
 
@@ -690,9 +705,9 @@ cd api && go run ./cmd/server    # starts API on :8080
 ```
 
 Each Go-based component has its own `go.mod`, so Go commands (`go run`,
-`go test`, `go build`) run from inside the component directory. A
-root-level `go.work` ties `api/` and `cli/` together for editor tooling;
-CI still operates per-module.
+`go test`, `go build`) run from inside the component directory. There is
+no `go.work` today — both modules are edited independently. Add one if
+cross-module refactors become common.
 
 Migrations run automatically on startup.
 

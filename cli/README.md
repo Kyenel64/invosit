@@ -4,8 +4,9 @@ Go CLI for Invosit.
 
 ## Commands
 
-- `invosit login` — opens a browser to sign in (Email, Github so far)
+- `invosit login` — opens a browser to sign in (GitHub OIDC).
 - `invosit user get` — prints the saved user id and email.
+- `invosit init` — binds the current directory to a workspace + environment via an interactive picker, writing `.invosit.yaml`.
 
 ## Dev
 
@@ -35,5 +36,8 @@ inside `cli/` (its own `go.mod`).
   `return_session_token_exchange_code` exchange).
 - `internal/credstore/` — credential persistence (`0600`, atomic write,
   perm check on load).
-- `internal/apiclient/` — typed client for the Invosit API. Only `/auth/me`
-  today.
+- `internal/apiclient/` — typed client for the Invosit API. Calls
+  `/auth/me`, `/workspaces`, and `/workspaces/{id}/environments`.
+- `internal/manifest/` — `.invosit.yaml` Load/Save/Validate (atomic
+  write, YAML decode with unknown-field rejection).
+- `internal/tui/` — Bubbletea interactive picker used by `invosit init`.
