@@ -26,7 +26,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		apiClient := apiclient.NewClient(baseURL())
+		apiClient := apiclient.NewClient(creds.APIURL)
 		workspace, err := chooseWorkspace(cmd.Context(), apiClient, creds.SessionToken)
 		if err != nil {
 			return err
