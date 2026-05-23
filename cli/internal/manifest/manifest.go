@@ -12,7 +12,7 @@ import (
 
 const (
 	Version     = 1
-	DefaultName = ".invosit.yml"
+	DefaultName = ".invosit.yaml"
 
 	workspaceIDPrefix = "ws_"
 	fileIDPrefix      = "file_"
