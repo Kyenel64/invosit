@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/goccy/go-yaml"
@@ -33,7 +34,7 @@ type File struct {
 var ErrNotFound = errors.New("invosit manifest not found")
 
 func Load(path string) (*Manifest, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(filepath.Clean(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w at %s", ErrNotFound, path)
 	}

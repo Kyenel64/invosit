@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
+	"github.com/kyenel64/invosit/cli/internal/manifest"
 	"github.com/kyenel64/invosit/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -20,6 +22,10 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
+		if err := confirmOverwriteIfExists(manifest.DefaultName); err != nil {
+			return err
+		}
+
 		apiClient := apiclient.NewClient(baseURL())
 		workspace, err := chooseWorkspace(cmd.Context(), apiClient, creds.SessionToken)
 		if err != nil {
@@ -30,14 +36,47 @@ var initCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		_ = environment
 
+		if err := manifest.Save(manifest.DefaultName, &manifest.Manifest{
+			Version:     1,
+			WorkspaceID: workspace.ID,
+			Environment: environment.Name,
+		}); err != nil {
+			return fmt.Errorf("save manifest: %w", err)
+		}
+
+		fmt.Printf("Initialized %s (workspace: %s, environment: %s)\n", manifest.DefaultName, workspace.Name, environment.Name)
 		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(initCmd)
+}
+
+func confirmOverwriteIfExists(path string) error {
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	choice, err := tui.Select(
+		fmt.Sprintf("%s already exists. Overwrite?", path),
+		[]string{"No, cancel", "Yes, overwrite"},
+	)
+	if err != nil {
+		if errors.Is(err, tui.ErrCancelled) {
+			return errors.New("init cancelled")
+		}
+		return err
+	}
+	if choice == 0 {
+		return errors.New("init cancelled")
+	}
+	return nil
 }
 
 func chooseWorkspace(ctx context.Context, client *apiclient.Client, token string) (*apiclient.Workspace, error) {
