@@ -118,7 +118,7 @@ Do **not** pause for: choosing a branch name, choosing a commit message, decidin
 6. **Resolve the linked issue** per "Issue linking" above:
    - Search existing issues with `gh issue list --search`.
    - If non-trivial and no match: draft and create the issue directly via `gh issue create` — do not ask first. Capture the returned number.
-7. **Present a brief checkpoint** before creating the PR: title, base ← head, linked issue (existing `#N` or "will create: <drafted title>"), and one-line body summary. Wait for a single "go" (or inline corrections) — this is the only human gate. Do not re-confirm each field individually.
+7. **Present a brief checkpoint** before creating the PR: title, base ← head, **draft status** (state "draft" or "ready for review" — draft is the default per "Defaults" above, so the user can see at a glance that the PR will be opened as a draft), linked issue (existing `#N` or "will create: <drafted title>"), and one-line body summary. Wait for a single "go" (or inline corrections) — this is the only human gate. Do not re-confirm each field individually.
 8. **Create the PR** on confirmation using a heredoc for the body:
    ```
    gh pr create --draft --base <base> --title "<title>" --body "$(cat <<'EOF'
