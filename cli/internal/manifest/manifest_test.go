@@ -25,22 +25,9 @@ func tmpPath(t *testing.T) string {
 }
 
 func TestValidateAccepts(t *testing.T) {
-	t.Run("minimal", func(t *testing.T) {
-		if err := validManifest().Validate(); err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("with files", func(t *testing.T) {
-		m := validManifest()
-		m.Files = []manifest.File{
-			{Path: ".env", FileID: "file_one", ContentHash: "abc"},
-			{Path: "secrets/db.key", FileID: "file_two", ContentHash: "def"},
-		}
-		if err := m.Validate(); err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
+	if err := validManifest().Validate(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestValidateRejects(t *testing.T) {
@@ -69,30 +56,6 @@ func TestValidateRejects(t *testing.T) {
 			mutate:  func(m *manifest.Manifest) { m.Environment = "" },
 			wantSub: "environment",
 		},
-		{
-			name: "file with empty path",
-			mutate: func(m *manifest.Manifest) {
-				m.Files = []manifest.File{{Path: "", FileID: "file_x"}}
-			},
-			wantSub: "path",
-		},
-		{
-			name: "file with wrong file_id prefix",
-			mutate: func(m *manifest.Manifest) {
-				m.Files = []manifest.File{{Path: ".env", FileID: "ws_x"}}
-			},
-			wantSub: "file_id",
-		},
-		{
-			name: "duplicate file paths",
-			mutate: func(m *manifest.Manifest) {
-				m.Files = []manifest.File{
-					{Path: ".env", FileID: "file_one"},
-					{Path: ".env", FileID: "file_two"},
-				}
-			},
-			wantSub: "duplicate",
-		},
 	}
 
 	for _, tc := range cases {
@@ -113,10 +76,6 @@ func TestValidateRejects(t *testing.T) {
 func TestSaveLoadRoundtrip(t *testing.T) {
 	path := tmpPath(t)
 	in := validManifest()
-	in.Files = []manifest.File{
-		{Path: ".env", FileID: "file_one", ContentHash: "abc"},
-		{Path: "secrets/db.key", FileID: "file_two", ContentHash: "def"},
-	}
 
 	if err := manifest.Save(path, in); err != nil {
 		t.Fatalf("Save: %v", err)
