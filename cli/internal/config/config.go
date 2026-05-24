@@ -24,6 +24,28 @@ type Config struct {
 
 var ErrNotFound = errors.New("invosit config not found")
 
+func Find(startDir string) (string, error) {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", fmt.Errorf("absolute path %s: %w", startDir, err)
+	}
+	for {
+		candidate := filepath.Join(dir, FileName)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("stat %s: %w", candidate, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("%w from %s", ErrNotFound, startDir)
+		}
+		dir = parent
+	}
+}
+
 func Load(path string) (*Config, error) {
 	f, err := os.Open(filepath.Clean(path))
 	if errors.Is(err, os.ErrNotExist) {

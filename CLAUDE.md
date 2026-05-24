@@ -331,9 +331,14 @@ Built on Cobra; structured the same way as the API server with thin
   carries the binding plus an optional team default:
   `version`, `workspaceId`, `defaultEnvironment` (optional) — no file list.
   Each `push`/`pull` accepts `--env <name>`; when omitted, it falls back to
-  `defaultEnvironment`. The API is queried for the file inventory on every
-  push/pull, so dashboard uploads and CLI pushes share one source of truth
-  and the file *names* aren't leaked into git.
+  `defaultEnvironment`. `config.Find(startDir)` walks up from `startDir` to
+  the filesystem root looking for `.invosit.json` — push/pull will use it so
+  subcommands work from any subdirectory of an invosit project. The API is
+  queried for the file inventory on every push/pull, so dashboard uploads
+  and CLI pushes share one source of truth and the file *names* aren't
+  leaked into git.
+- **Global `--config <path>` flag** on `rootCmd` overrides the discovered
+  config path; when set, commands skip walk-up and use the given file.
 - **API client** — `internal/apiclient` exposes `Me`, `GetWorkspaces`, and
   `GetEnvironments` over Bearer-token auth.
 

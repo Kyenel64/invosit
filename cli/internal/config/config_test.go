@@ -176,6 +176,105 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestFindInCwd(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.FileName)
+	if err := os.WriteFile(path, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	found, err := config.Find(dir)
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if found != path {
+		t.Errorf("Find = %q, want %q", found, path)
+	}
+}
+
+func TestFindWalksUp(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "a", "b", "c")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cfgPath := filepath.Join(root, config.FileName)
+	if err := os.WriteFile(cfgPath, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	found, err := config.Find(nested)
+	if err != nil {
+		t.Fatalf("Find from %q: %v", nested, err)
+	}
+	if found != cfgPath {
+		t.Errorf("Find from %q = %q, want %q", nested, found, cfgPath)
+	}
+}
+
+func TestFindReturnsClosest(t *testing.T) {
+	root := t.TempDir()
+	mid := filepath.Join(root, "mid")
+	leaf := filepath.Join(mid, "leaf")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	rootCfg := filepath.Join(root, config.FileName)
+	midCfg := filepath.Join(mid, config.FileName)
+	if err := os.WriteFile(rootCfg, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile root: %v", err)
+	}
+	if err := os.WriteFile(midCfg, []byte(`{"version":1,"workspaceId":"ws_y"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile mid: %v", err)
+	}
+
+	found, err := config.Find(leaf)
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if found != midCfg {
+		t.Errorf("Find returned %q, want closest %q", found, midCfg)
+	}
+}
+
+func TestFindSkipsDirectoryWithMatchingName(t *testing.T) {
+	root := t.TempDir()
+	leaf := filepath.Join(root, "leaf")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatalf("MkdirAll leaf: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(leaf, config.FileName), 0o755); err != nil {
+		t.Fatalf("Mkdir directory-named-like-config: %v", err)
+	}
+	rootCfg := filepath.Join(root, config.FileName)
+	if err := os.WriteFile(rootCfg, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile root: %v", err)
+	}
+
+	found, err := config.Find(leaf)
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if found != rootCfg {
+		t.Errorf("Find returned %q, want %q (should skip directory at leaf)", found, rootCfg)
+	}
+}
+
+func TestFindReturnsErrNotFound(t *testing.T) {
+	dir := t.TempDir()
+
+	found, err := config.Find(dir)
+	if err == nil {
+		if !strings.HasPrefix(found, dir) {
+			t.Skipf("ambient .invosit.json found at %q above test dir %q; skipping", found, dir)
+		}
+		t.Fatalf("Find returned unexpected path inside tmpdir %q: %q", dir, found)
+	}
+	if !errors.Is(err, config.ErrNotFound) {
+		t.Errorf("want ErrNotFound, got %v", err)
+	}
+}
+
 func TestLoadValidates(t *testing.T) {
 	path := tmpPath(t)
 	body := `{"version":999,"workspaceId":"ws_abc","defaultEnvironment":"dev"}`
