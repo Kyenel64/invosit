@@ -17,9 +17,9 @@ const (
 )
 
 type Config struct {
-	Version     int    `json:"version"`
-	WorkspaceID string `json:"workspaceId"`
-	Environment string `json:"environment"`
+	Version            int    `json:"version"`
+	WorkspaceID        string `json:"workspaceId"`
+	DefaultEnvironment string `json:"defaultEnvironment,omitempty"`
 }
 
 var ErrNotFound = errors.New("invosit config not found")

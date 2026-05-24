@@ -13,9 +13,9 @@ import (
 
 func validConfig() *config.Config {
 	return &config.Config{
-		Version:     config.Version,
-		WorkspaceID: "ws_abc123",
-		Environment: "dev",
+		Version:            config.Version,
+		WorkspaceID:        "ws_abc123",
+		DefaultEnvironment: "dev",
 	}
 }
 
@@ -112,6 +112,40 @@ func TestSaveLeavesNoTmpFile(t *testing.T) {
 	}
 }
 
+func TestSaveOmitsEmptyDefaultEnvironment(t *testing.T) {
+	path := tmpPath(t)
+	cfg := validConfig()
+	cfg.DefaultEnvironment = ""
+
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	body, err := os.ReadFile(path) //nolint:gosec // test reads a file in t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(body), "defaultEnvironment") {
+		t.Errorf("saved file should omit defaultEnvironment when empty; got:\n%s", body)
+	}
+}
+
+func TestLoadAcceptsMissingDefaultEnvironment(t *testing.T) {
+	path := tmpPath(t)
+	body := `{"version":1,"workspaceId":"ws_abc"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.DefaultEnvironment != "" {
+		t.Errorf("DefaultEnvironment = %q, want empty", loaded.DefaultEnvironment)
+	}
+}
+
 func TestLoadMissing(t *testing.T) {
 	_, err := config.Load(tmpPath(t))
 	if !errors.Is(err, config.ErrNotFound) {
@@ -121,7 +155,7 @@ func TestLoadMissing(t *testing.T) {
 
 func TestLoadRejectsUnknownField(t *testing.T) {
 	path := tmpPath(t)
-	body := `{"version":1,"workspaceId":"ws_abc","environment":"dev","bogus":"hi"}`
+	body := `{"version":1,"workspaceId":"ws_abc","defaultEnvironment":"dev","bogus":"hi"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -144,7 +178,7 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 
 func TestLoadValidates(t *testing.T) {
 	path := tmpPath(t)
-	body := `{"version":999,"workspaceId":"ws_abc","environment":"dev"}`
+	body := `{"version":999,"workspaceId":"ws_abc","defaultEnvironment":"dev"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
