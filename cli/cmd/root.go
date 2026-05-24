@@ -3,8 +3,11 @@ package cmd
 import (
 	"os"
 
+	"github.com/kyenel64/invosit/cli/internal/config"
 	"github.com/spf13/cobra"
 )
+
+var configPathFlag string
 
 var rootCmd = &cobra.Command{
 	Use:   "invosit",
@@ -26,4 +29,12 @@ func Execute() {
 
 func init() {
 	rootCmd.CompletionOptions.HiddenDefaultCmd = false // TODO: Make true in prod
+	rootCmd.PersistentFlags().StringVar(&configPathFlag, "config", "", "path to .invosit.json (default: ./.invosit.json)")
+}
+
+func resolveConfigPath() string {
+	if configPathFlag != "" {
+		return configPathFlag
+	}
+	return config.FileName
 }

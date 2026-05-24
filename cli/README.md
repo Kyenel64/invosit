@@ -6,7 +6,11 @@ Go CLI for Invosit.
 
 - `invosit login` — opens a browser to sign in (GitHub OIDC).
 - `invosit user get` — prints the saved user id and email.
-- `invosit init` — binds the current directory to a workspace + environment via an interactive picker, writing `.invosit.json`.
+- `invosit init` — binds the current directory to a workspace + optional default environment via an interactive picker, writing `.invosit.json`.
+
+## Global flags
+
+- `--config <path>` — use the config file at `<path>` instead of `./.invosit.json`.
 
 ## Dev
 

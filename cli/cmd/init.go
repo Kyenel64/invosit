@@ -22,7 +22,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		if err := confirmOverwriteIfExists(config.FileName); err != nil {
+		if err := confirmOverwriteIfExists(resolveConfigPath()); err != nil {
 			return err
 		}
 
@@ -37,7 +37,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		if err := config.Save(config.FileName, &config.Config{
+		if err := config.Save(resolveConfigPath(), &config.Config{
 			Version:            config.Version,
 			WorkspaceID:        workspace.ID,
 			DefaultEnvironment: defaultEnv,
@@ -46,9 +46,9 @@ var initCmd = &cobra.Command{
 		}
 
 		if defaultEnv == "" {
-			fmt.Printf("Initialized %s (workspace: %s, no default environment — pass --env to push/pull)\n", config.FileName, workspace.Name)
+			fmt.Printf("Initialized %s (workspace: %s, no default environment — pass --env to push/pull)\n", resolveConfigPath(), workspace.Name)
 		} else {
-			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", config.FileName, workspace.Name, defaultEnv)
+			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", resolveConfigPath(), workspace.Name, defaultEnv)
 		}
 		return nil
 	},
