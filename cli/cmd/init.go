@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
-	"github.com/kyenel64/invosit/cli/internal/manifest"
+	"github.com/kyenel64/invosit/cli/internal/config"
 	"github.com/kyenel64/invosit/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -22,7 +22,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		if err := confirmOverwriteIfExists(manifest.DefaultName); err != nil {
+		if err := confirmOverwriteIfExists(resolveConfigPath()); err != nil {
 			return err
 		}
 
@@ -32,20 +32,24 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		environment, err := chooseEnvironment(cmd.Context(), apiClient, creds.SessionToken, workspace.ID)
+		defaultEnv, err := chooseDefaultEnvironment(cmd.Context(), apiClient, creds.SessionToken, workspace.ID)
 		if err != nil {
 			return err
 		}
 
-		if err := manifest.Save(manifest.DefaultName, &manifest.Manifest{
-			Version:     1,
-			WorkspaceID: workspace.ID,
-			Environment: environment.Name,
+		if err := config.Save(resolveConfigPath(), &config.Config{
+			Version:            config.Version,
+			WorkspaceID:        workspace.ID,
+			DefaultEnvironment: defaultEnv,
 		}); err != nil {
-			return fmt.Errorf("save manifest: %w", err)
+			return fmt.Errorf("save config: %w", err)
 		}
 
-		fmt.Printf("Initialized %s (workspace: %s, environment: %s)\n", manifest.DefaultName, workspace.Name, environment.Name)
+		if defaultEnv == "" {
+			fmt.Printf("Initialized %s (workspace: %s, no default environment — pass --env to push/pull)\n", resolveConfigPath(), workspace.Name)
+		} else {
+			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", resolveConfigPath(), workspace.Name, defaultEnv)
+		}
 		return nil
 	},
 }
@@ -102,25 +106,30 @@ func chooseWorkspace(ctx context.Context, client *apiclient.Client, token string
 	return &workspaces[selectedIdx], nil
 }
 
-func chooseEnvironment(ctx context.Context, client *apiclient.Client, token string, workspaceID string) (*apiclient.Environment, error) {
+func chooseDefaultEnvironment(ctx context.Context, client *apiclient.Client, token string, workspaceID string) (string, error) {
 	environments, err := client.GetEnvironments(ctx, token, workspaceID)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
-			return nil, errors.New("not logged in or session expired. run `invosit login` to authenticate")
+			return "", errors.New("not logged in or session expired. run `invosit login` to authenticate")
 		}
-		return nil, err
+		return "", err
 	}
 	if len(environments) == 0 {
-		return nil, fmt.Errorf("you don't have access to any environments in workspace: %s", workspaceID)
+		return "", fmt.Errorf("you don't have access to any environments in workspace: %s", workspaceID)
 	}
 
-	labels := make([]string, len(environments))
-	for i, environment := range environments {
-		labels[i] = environment.Name
+	const skipLabel = "Skip (no default)"
+	labels := make([]string, 0, len(environments)+1)
+	labels = append(labels, skipLabel)
+	for _, environment := range environments {
+		labels = append(labels, environment.Name)
 	}
-	selectedIdx, err := tui.Select("Select an environment:", labels)
+	selectedIdx, err := tui.Select("Select a default environment (optional):", labels)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return &environments[selectedIdx], nil
+	if selectedIdx == 0 {
+		return "", nil
+	}
+	return environments[selectedIdx-1].Name, nil
 }
