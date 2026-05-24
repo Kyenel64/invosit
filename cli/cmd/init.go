@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
-	"github.com/kyenel64/invosit/cli/internal/manifest"
+	"github.com/kyenel64/invosit/cli/internal/config"
 	"github.com/kyenel64/invosit/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -22,7 +22,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		if err := confirmOverwriteIfExists(manifest.DefaultName); err != nil {
+		if err := confirmOverwriteIfExists(config.FileName); err != nil {
 			return err
 		}
 
@@ -37,15 +37,15 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		if err := manifest.Save(manifest.DefaultName, &manifest.Manifest{
-			Version:     1,
+		if err := config.Save(config.FileName, &config.Config{
+			Version:     config.Version,
 			WorkspaceID: workspace.ID,
 			Environment: environment.Name,
 		}); err != nil {
-			return fmt.Errorf("save manifest: %w", err)
+			return fmt.Errorf("save config: %w", err)
 		}
 
-		fmt.Printf("Initialized %s (workspace: %s, environment: %s)\n", manifest.DefaultName, workspace.Name, environment.Name)
+		fmt.Printf("Initialized %s (workspace: %s, environment: %s)\n", config.FileName, workspace.Name, environment.Name)
 		return nil
 	},
 }

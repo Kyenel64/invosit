@@ -10,7 +10,7 @@ effectively without needing to be re-explained from scratch each session.
 Invosit syncs encrypted files alongside a git repo — for files that shouldn't be committed.
 
 It lets teams push and pull encrypted files alongside a repo without committing
-them. A small manifest file (`.invosit.yaml`) is committed to git, binding the
+them. A small config file (`.invosit.json`) is committed to git, binding the
 directory to a `(workspace, environment)` pair. The API is the source of truth
 for which files exist in that environment; the actual file content lives in
 encrypted blob storage and is pulled down by teammates via the CLI.
@@ -317,15 +317,15 @@ Built on Cobra; structured the same way as the API server with thin
   credentials.
 - **`invosit init`** — binds the current directory to a `(workspace, environment)`
   pair via an interactive Bubbletea picker (`internal/tui`) and writes a
-  YAML manifest at `.invosit.yaml`. If a manifest already exists, prompts
+  JSON config at `.invosit.json`. If a config already exists, prompts
   to overwrite via the same picker. Mirrors `git init` (binding only — no
   data fetched).
 - **Credentials at rest** — `credstore.FileStore` writes
   `<user-config-dir>/invosit/credentials.json` at `0600` via a
   write-temp-then-rename atomic swap, and refuses to load files with
   group/other bits set (POSIX only).
-- **Manifest** — `internal/manifest` loads/saves `.invosit.yaml`. The manifest
-  carries only the binding (`version`, `workspace_id`, `environment`) — no
+- **Config** — `internal/config` loads/saves `.invosit.json`. The config
+  carries only the binding (`version`, `workspaceId`, `environment`) — no
   file list. The API is queried for the file inventory on every push/pull, so
   dashboard uploads and CLI pushes share one source of truth and the file
   *names* aren't leaked into git.
@@ -343,7 +343,7 @@ login through the CLI is not a planned feature.
 
 ### Planned
 
-- **`invosit add <file>` / `invosit push` / `invosit pull`.** `add` registers a new file with the API and uploads it. `push` queries the API for tracked files in the bound environment, hashes locals, and re-uploads changed ones. `pull` queries the API for every tracked file and downloads them via signed URLs. The manifest is never the inventory — the API is. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
+- **`invosit add <file>` / `invosit push` / `invosit pull`.** `add` registers a new file with the API and uploads it. `push` queries the API for tracked files in the bound environment, hashes locals, and re-uploads changed ones. `pull` queries the API for every tracked file and downloads them via signed URLs. The config is never the inventory — the API is. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
 - **Encryption boundary.** All AES-256-GCM encryption/decryption of file contents happens here, not in the API. Generates per-file DEKs and wraps each with the recipient's public key (sourced from `users.public_key` via the API).
 - **Storage I/O.** Uploads/downloads encrypted blobs **directly** to the storage provider using short-lived signed URLs issued by the API. Bytes never pass through the API server.
 - **Local key material.** Generates and stores the user's keypair locally; the public key gets registered with the API on first run, the private key never leaves the machine.

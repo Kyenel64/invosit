@@ -11,7 +11,7 @@ var rootCmd = &cobra.Command{
 	Short: "File sync for gitignored files.",
 	Long: `Invosit lets devs/teams push and pull gitignored files securely alongside a repository, with access control.
 
-A small manifest (.invosit.yaml) is committed to git; the actual file
+A small config file (.invosit.json) is committed to git; the actual file
 bytes live in encrypted blob storage and are pulled down by teammates
 via this CLI.`,
 	SilenceUsage: true,

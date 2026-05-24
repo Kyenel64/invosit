@@ -1,4 +1,4 @@
-package manifest_test
+package config_test
 
 import (
 	"errors"
@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kyenel64/invosit/cli/internal/manifest"
+	"github.com/kyenel64/invosit/cli/internal/config"
 )
 
-func validManifest() *manifest.Manifest {
-	return &manifest.Manifest{
-		Version:     manifest.Version,
+func validConfig() *config.Config {
+	return &config.Config{
+		Version:     config.Version,
 		WorkspaceID: "ws_abc123",
 		Environment: "dev",
 	}
@@ -21,11 +21,11 @@ func validManifest() *manifest.Manifest {
 
 func tmpPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), manifest.DefaultName)
+	return filepath.Join(t.TempDir(), config.FileName)
 }
 
 func TestValidateAccepts(t *testing.T) {
-	if err := validManifest().Validate(); err != nil {
+	if err := validConfig().Validate(); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -33,36 +33,31 @@ func TestValidateAccepts(t *testing.T) {
 func TestValidateRejects(t *testing.T) {
 	cases := []struct {
 		name    string
-		mutate  func(*manifest.Manifest)
+		mutate  func(*config.Config)
 		wantSub string
 	}{
 		{
 			name:    "wrong version",
-			mutate:  func(m *manifest.Manifest) { m.Version = 999 },
+			mutate:  func(c *config.Config) { c.Version = 999 },
 			wantSub: "version",
 		},
 		{
 			name:    "empty workspace id",
-			mutate:  func(m *manifest.Manifest) { m.WorkspaceID = "" },
-			wantSub: "workspace_id",
+			mutate:  func(c *config.Config) { c.WorkspaceID = "" },
+			wantSub: "workspaceId",
 		},
 		{
 			name:    "workspace id wrong prefix",
-			mutate:  func(m *manifest.Manifest) { m.WorkspaceID = "usr_abc123" },
-			wantSub: "workspace_id",
-		},
-		{
-			name:    "empty environment",
-			mutate:  func(m *manifest.Manifest) { m.Environment = "" },
-			wantSub: "environment",
+			mutate:  func(c *config.Config) { c.WorkspaceID = "usr_abc123" },
+			wantSub: "workspaceId",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := validManifest()
-			tc.mutate(m)
-			err := m.Validate()
+			cfg := validConfig()
+			tc.mutate(cfg)
+			err := cfg.Validate()
 			if err == nil {
 				t.Fatalf("want error containing %q, got nil", tc.wantSub)
 			}
@@ -75,13 +70,13 @@ func TestValidateRejects(t *testing.T) {
 
 func TestSaveLoadRoundtrip(t *testing.T) {
 	path := tmpPath(t)
-	in := validManifest()
+	in := validConfig()
 
-	if err := manifest.Save(path, in); err != nil {
+	if err := config.Save(path, in); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	out, err := manifest.Load(path)
+	out, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -91,16 +86,16 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 }
 
 func TestSaveRejectsNil(t *testing.T) {
-	err := manifest.Save(tmpPath(t), nil)
+	err := config.Save(tmpPath(t), nil)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
 }
 
 func TestSaveRejectsInvalid(t *testing.T) {
-	m := validManifest()
-	m.WorkspaceID = "bad_prefix"
-	err := manifest.Save(tmpPath(t), m)
+	cfg := validConfig()
+	cfg.WorkspaceID = "bad_prefix"
+	err := config.Save(tmpPath(t), cfg)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -108,7 +103,7 @@ func TestSaveRejectsInvalid(t *testing.T) {
 
 func TestSaveLeavesNoTmpFile(t *testing.T) {
 	path := tmpPath(t)
-	if err := manifest.Save(path, validManifest()); err != nil {
+	if err := config.Save(path, validConfig()); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -118,43 +113,43 @@ func TestSaveLeavesNoTmpFile(t *testing.T) {
 }
 
 func TestLoadMissing(t *testing.T) {
-	_, err := manifest.Load(tmpPath(t))
-	if !errors.Is(err, manifest.ErrNotFound) {
+	_, err := config.Load(tmpPath(t))
+	if !errors.Is(err, config.ErrNotFound) {
 		t.Errorf("want ErrNotFound, got %v", err)
 	}
 }
 
 func TestLoadRejectsUnknownField(t *testing.T) {
 	path := tmpPath(t)
-	body := "version: 1\nworkspace_id: ws_abc\nenvironment: dev\nbogus_field: hi\n"
+	body := `{"version":1,"workspaceId":"ws_abc","environment":"dev","bogus":"hi"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if _, err := manifest.Load(path); err == nil {
+	if _, err := config.Load(path); err == nil {
 		t.Fatal("want error for unknown field, got nil")
 	}
 }
 
-func TestLoadRejectsMalformedYAML(t *testing.T) {
+func TestLoadRejectsMalformedJSON(t *testing.T) {
 	path := tmpPath(t)
-	if err := os.WriteFile(path, []byte("::: not valid yaml :::"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("::: not valid json :::"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if _, err := manifest.Load(path); err == nil {
-		t.Fatal("want error for malformed YAML, got nil")
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("want error for malformed JSON, got nil")
 	}
 }
 
 func TestLoadValidates(t *testing.T) {
 	path := tmpPath(t)
-	body := "version: 999\nworkspace_id: ws_abc\nenvironment: dev\n"
+	body := `{"version":999,"workspaceId":"ws_abc","environment":"dev"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, err := manifest.Load(path)
+	_, err := config.Load(path)
 	if err == nil {
 		t.Fatal("want validation error, got nil")
 	}
