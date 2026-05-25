@@ -49,21 +49,6 @@ CREATE TABLE files (
 CREATE INDEX        idx_files_workspace ON files (workspace_id);
 CREATE UNIQUE INDEX files_env_path      ON files (environment_id, path);
 
-CREATE TABLE file_versions (
-    id           TEXT        PRIMARY KEY,
-    file_id      TEXT        NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    blob_key     TEXT        NOT NULL,
-    content_hash TEXT        NOT NULL,
-    size         BIGINT      NOT NULL,
-    pushed_by    TEXT                 REFERENCES users(id) ON DELETE SET NULL,
-    pushed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    message      TEXT,
-    is_current   BOOLEAN     NOT NULL DEFAULT FALSE
-);
-
-CREATE INDEX        idx_file_versions_file ON file_versions (file_id);
-CREATE UNIQUE INDEX file_versions_current  ON file_versions (file_id) WHERE is_current;
-
 CREATE TABLE wrapped_deks (
     file_id       TEXT  NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     user_id       TEXT  NOT NULL REFERENCES users(id) ON DELETE CASCADE,

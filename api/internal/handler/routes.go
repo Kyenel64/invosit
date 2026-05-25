@@ -38,8 +38,4 @@ func AddRoutes(mux *http.ServeMux, h *Handler) {
 		envScoped(http.HandlerFunc(h.GetFile)))
 	mux.Handle("DELETE /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}",
 		envScoped(http.HandlerFunc(h.DeleteFile)))
-	mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}/versions",
-		envScoped(http.HandlerFunc(h.ListVersions)))
-	mux.Handle("POST   /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}/rollback",
-		envScoped(http.HandlerFunc(h.RollbackFile)))
 }
