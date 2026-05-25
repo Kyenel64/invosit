@@ -54,14 +54,12 @@ func TestPushFile_Success(t *testing.T) {
 	defer db.Close()
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "config/.env").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`INSERT INTO files`).
 		WithArgs(sqlmock.AnyArg(), "ws_abc", "env_abc", "config/.env", validHash, int64(123), "usr_abc", sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
-	mock.ExpectExec(`UPDATE file_versions SET is_current = FALSE`).
-		WithArgs("file_xyz").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`INSERT INTO file_versions`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
 	stub := &stubStorage{putURL: "https://signed/put"}
@@ -85,8 +83,114 @@ func TestPushFile_Success(t *testing.T) {
 	if got["id"] != "file_xyz" {
 		t.Errorf("id = %v", got["id"])
 	}
+	if _, present := got["version_id"]; present {
+		t.Errorf("version_id should not appear in response: %v", got["version_id"])
+	}
+	if stub.deleteCalls != 0 {
+		t.Errorf("first push to new path should not delete any blob; got %d calls", stub.deleteCalls)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Error(err)
+	}
+}
+
+// Overwriting an existing path with new content must best-effort delete the
+// prior blob after the row commits, so storage doesn't accumulate orphans.
+func TestPushFile_OverwriteDeletesPriorBlob(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	priorHash := strings.Repeat("b", 64)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "config/.env").
+		WillReturnRows(sqlmock.NewRows([]string{"content_hash"}).AddRow(priorHash))
+	mock.ExpectQuery(`INSERT INTO files`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
+	mock.ExpectCommit()
+
+	stub := &stubStorage{putURL: "https://signed/put"}
+	h := &Handler{db: db, blobs: stub}
+
+	body := `{"path":"config/.env","content_hash":"` + validHash + `","size":123}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.PushFile(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.deleteCalls != 1 {
+		t.Fatalf("storage.Delete calls = %d, want 1", stub.deleteCalls)
+	}
+	if stub.deletedKey != "ws_abc/"+priorHash {
+		t.Errorf("deleted key = %q, want prior blob key", stub.deletedKey)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// Re-pushing the same content (same hash) should not delete the blob the new
+// row now points at.
+func TestPushFile_OverwriteSameHashSkipsDelete(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "config/.env").
+		WillReturnRows(sqlmock.NewRows([]string{"content_hash"}).AddRow(validHash))
+	mock.ExpectQuery(`INSERT INTO files`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
+	mock.ExpectCommit()
+
+	stub := &stubStorage{putURL: "https://signed/put"}
+	h := &Handler{db: db, blobs: stub}
+
+	body := `{"path":"config/.env","content_hash":"` + validHash + `","size":123}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.PushFile(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.deleteCalls != 0 {
+		t.Errorf("same-hash re-push should skip blob delete; got %d calls", stub.deleteCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// Storage failure during prior-blob cleanup must not fail the push — the
+// upsert already committed and the row points at the new blob.
+func TestPushFile_OverwritePriorBlobDeleteFailureStillSucceeds(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	priorHash := strings.Repeat("c", 64)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "config/.env").
+		WillReturnRows(sqlmock.NewRows([]string{"content_hash"}).AddRow(priorHash))
+	mock.ExpectQuery(`INSERT INTO files`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
+	mock.ExpectCommit()
+
+	stub := &stubStorage{putURL: "https://signed/put", deleteErr: errors.New("storage down")}
+	h := &Handler{db: db, blobs: stub}
+
+	body := `{"path":"config/.env","content_hash":"` + validHash + `","size":123}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.PushFile(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Errorf("status = %d, want 201 (body = %s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -180,19 +284,17 @@ func TestPushFile_RejectsBadHash(t *testing.T) {
 
 // If presigning fails, the transaction must roll back so we don't end up
 // with files.content_hash pointing at a blob the client was never able to
-// upload. Verifies the ordering: all DB work happens inside the tx, presign
+// upload. Verifies the ordering: DB upsert happens inside the tx, presign
 // happens before Commit.
 func TestPushFile_RollsBackWhenPresignFails(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`INSERT INTO files`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
-	mock.ExpectExec(`UPDATE file_versions SET is_current = FALSE`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`INSERT INTO file_versions`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectRollback() // No ExpectCommit — presign failure should keep the tx open for rollback.
 
 	h := &Handler{db: db, blobs: &stubStorage{putErr: errors.New("storage down")}}
@@ -214,6 +316,8 @@ func TestPushFile_RollsBackOnInsertFailure(t *testing.T) {
 	defer db.Close()
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT content_hash FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`INSERT INTO files`).
 		WillReturnError(errors.New("boom"))
 	mock.ExpectRollback()
@@ -404,246 +508,6 @@ func TestDeleteFile_MissingReturns403(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestListVersions_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
-
-	mock.ExpectQuery(`SELECT id FROM files WHERE id = \$1 AND environment_id = \$2`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
-	mock.ExpectQuery(`SELECT id, file_id, content_hash, size, pushed_by, pushed_at, message, is_current\s+FROM file_versions`).
-		WithArgs("file_xyz").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "content_hash", "size", "pushed_by", "pushed_at", "message", "is_current"}).
-			AddRow("ver_3", "file_xyz", validHash, int64(30), "usr_abc", pushedAt, "third", true).
-			AddRow("ver_2", "file_xyz", validHash, int64(20), "usr_abc", pushedAt.Add(-time.Hour), "second", false).
-			AddRow("ver_1", "file_xyz", validHash, int64(10), "usr_abc", pushedAt.Add(-2*time.Hour), nil, false))
-
-	h := &Handler{db: db}
-	req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.ListVersions(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var got struct {
-		Versions []map[string]any `json:"versions"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(got.Versions) != 3 {
-		t.Fatalf("len = %d, want 3", len(got.Versions))
-	}
-	if got.Versions[0]["is_current"] != true {
-		t.Errorf("first row is_current = %v, want true", got.Versions[0]["is_current"])
-	}
-	if got.Versions[2]["message"] != "" {
-		t.Errorf("nil message should serialise as empty string, got %v", got.Versions[2]["message"])
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestListVersions_FileNotInEnvReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT id FROM files`).
-		WithArgs("file_missing", "env_abc").
-		WillReturnError(sql.ErrNoRows)
-
-	h := &Handler{db: db}
-	req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_missing")
-	rec := httptest.NewRecorder()
-	h.ListVersions(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestListVersions_EmptyArrayNotNull(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT id FROM files`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_xyz"))
-	mock.ExpectQuery(`SELECT id, file_id, content_hash`).
-		WithArgs("file_xyz").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "file_id", "content_hash", "size", "pushed_by", "pushed_at", "message", "is_current"}))
-
-	h := &Handler{db: db}
-	req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.ListVersions(rec, req)
-
-	var got struct {
-		Versions []map[string]any `json:"versions"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.Versions == nil || len(got.Versions) != 0 {
-		t.Errorf("versions = %+v, want empty slice (not null)", got.Versions)
-	}
-}
-
-func TestRollbackFile_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	targetPushedAt := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT path FROM files WHERE id = \$1 AND environment_id = \$2 FOR UPDATE`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"path"}).AddRow("config/.env"))
-	mock.ExpectQuery(`SELECT content_hash, size, pushed_by, pushed_at\s+FROM file_versions\s+WHERE id = \$1 AND file_id = \$2\s+FOR UPDATE`).
-		WithArgs("ver_old", "file_xyz").
-		WillReturnRows(sqlmock.NewRows([]string{"content_hash", "size", "pushed_by", "pushed_at"}).
-			AddRow(validHash, int64(99), "usr_orig", targetPushedAt))
-	mock.ExpectExec(`UPDATE file_versions SET is_current = FALSE WHERE file_id = \$1 AND is_current = TRUE`).
-		WithArgs("file_xyz").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`UPDATE file_versions SET is_current = TRUE WHERE id = \$1`).
-		WithArgs("ver_old").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`UPDATE files\s+SET content_hash = \$1, size = \$2, pushed_by = \$3, pushed_at = \$4\s+WHERE id = \$5`).
-		WithArgs(validHash, int64(99), sqlmock.AnyArg(), targetPushedAt, "file_xyz").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	h := &Handler{db: db}
-	body := `{"version_id":"ver_old"}`
-	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.RollbackFile(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got["content_hash"] != validHash {
-		t.Errorf("content_hash = %v", got["content_hash"])
-	}
-	if got["pushed_by"] != "usr_orig" {
-		t.Errorf("pushed_by = %v, want copy of target version's pusher", got["pushed_by"])
-	}
-	if got["path"] != "config/.env" {
-		t.Errorf("path = %v", got["path"])
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestRollbackFile_VersionNotInFileReturns404(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT path FROM files`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"path"}).AddRow("a.env"))
-	mock.ExpectQuery(`SELECT content_hash, size, pushed_by, pushed_at`).
-		WithArgs("ver_other", "file_xyz").
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectRollback()
-
-	h := &Handler{db: db}
-	body := `{"version_id":"ver_other"}`
-	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.RollbackFile(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec.Code)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestRollbackFile_FileNotInEnvReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT path FROM files`).
-		WithArgs("file_missing", "env_abc").
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectRollback()
-
-	h := &Handler{db: db}
-	body := `{"version_id":"ver_old"}`
-	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_missing")
-	rec := httptest.NewRecorder()
-	h.RollbackFile(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestRollbackFile_ViewerForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
-	defer db.Close()
-
-	h := &Handler{db: db}
-	ctx := pushCtx()
-	ctx = httpx.WithWorkspaceRole(ctx, "viewer")
-
-	body := `{"version_id":"ver_old"}`
-	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(ctx)
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.RollbackFile(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestRollbackFile_RejectsBadVersionID(t *testing.T) {
-	bad := []string{
-		"",                      // missing
-		"file_xyz",              // wrong prefix
-		"versionid",             // no prefix
-		strings.Repeat("v", 65), // too long
-	}
-	for _, vid := range bad {
-		t.Run(vid, func(t *testing.T) {
-			db, _, _ := sqlmock.New()
-			defer db.Close()
-			h := &Handler{db: db}
-
-			body, _ := json.Marshal(map[string]any{"version_id": vid})
-			req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(string(body))).WithContext(pushCtx())
-			req.SetPathValue("fileId", "file_xyz")
-			rec := httptest.NewRecorder()
-			h.RollbackFile(rec, req)
-
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400 (body = %s)", rec.Code, rec.Body.String())
-			}
-		})
 	}
 }
 
