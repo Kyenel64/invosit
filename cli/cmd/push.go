@@ -14,7 +14,6 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/blob"
-	"github.com/kyenel64/invosit/cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -35,13 +34,9 @@ var pushCmd = &cobra.Command{
 			return err
 		}
 
-		configPath := resolveConfigPath()
-		cfg, err := config.Load(configPath)
+		cfg, configPath, err := loadProjectConfig()
 		if err != nil {
-			if errors.Is(err, config.ErrNotFound) {
-				return errors.New("no .invosit.json found. run `invosit init` first")
-			}
-			return fmt.Errorf("failed to load config: %w", err)
+			return err
 		}
 		projectRoot := filepath.Dir(configPath)
 
@@ -97,13 +92,8 @@ func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspac
 	return "", fmt.Errorf("environment %q not found in workspace", name)
 }
 
-func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRoot, arg string) error {
-	absPath, err := filepath.Abs(arg)
-	if err != nil {
-		return fmt.Errorf("failed to resolve path: %w", err)
-	}
-
-	storedPath, err := projectRelative(projectRoot, absPath)
+func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRoot, relPath string) error {
+	storedPath, err := projectRelative(projectRoot, relPath)
 	if err != nil {
 		return err
 	}
@@ -112,7 +102,7 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 	}
 
 	// TODO: Hash with TeeReader
-	hash, size, err := hashFile(absPath)
+	hash, size, err := hashFile(relPath)
 	if err != nil {
 		return err
 	}
@@ -129,7 +119,7 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 		return fmt.Errorf("failed to register file with api: %w", err)
 	}
 
-	file, err := os.Open(absPath) //nolint:gosec
+	file, err := os.Open(relPath) //nolint:gosec
 	if err != nil {
 		return fmt.Errorf("failed to open file for upload: %w", err)
 	}
@@ -143,8 +133,13 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 	return nil
 }
 
-func projectRelative(projectRoot, absPath string) (string, error) {
-	rel, err := filepath.Rel(projectRoot, absPath)
+// projectRelative returns filepath relative to project root.
+func projectRelative(projectRoot, relPath string) (string, error) {
+	absArg, err := filepath.Abs(relPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(projectRoot, absArg)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve project-relative path: %w", err)
 	}
@@ -155,26 +150,27 @@ func projectRelative(projectRoot, absPath string) (string, error) {
 	return rel, nil
 }
 
-func validateStoredPath(p string) error {
-	if p == "" {
+// validateStoredPath checks that the filepath is a valid path for invosit.
+func validateStoredPath(path string) error {
+	if path == "" {
 		return errors.New("path is empty")
 	}
-	if strings.ContainsRune(p, 0) {
+	if strings.ContainsRune(path, 0) {
 		return errors.New("path contains a null byte")
 	}
-	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") {
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
 		return errors.New("path must be relative, not absolute")
 	}
 	for _, sep := range []string{"/", "\\"} {
-		if slices.Contains(strings.Split(p, sep), "..") {
+		if slices.Contains(strings.Split(path, sep), "..") {
 			return errors.New("path contains traversal (..) segments")
 		}
 	}
 	return nil
 }
 
-func hashFile(absPath string) (string, int64, error) {
-	file, err := os.Open(absPath) //nolint:gosec
+func hashFile(relPath string) (string, int64, error) {
+	file, err := os.Open(relPath) //nolint:gosec
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to open file: %w", err)
 	}

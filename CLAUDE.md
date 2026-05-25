@@ -330,8 +330,6 @@ Built on Cobra; structured the same way as the API server with thin
   queried for the file inventory on every push/pull, so dashboard uploads
   and CLI pushes share one source of truth and the file *names* aren't
   leaked into git.
-- **Global `--config <path>` flag** on `rootCmd` overrides the discovered
-  config path; when set, commands skip walk-up and use the given file.
 - **API client** — `internal/apiclient` exposes `Me`, `GetWorkspaces`, and
   `GetEnvironments` over Bearer-token auth.
 
