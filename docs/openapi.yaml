@@ -337,14 +337,11 @@ paths:
       tags: [Files]
       summary: Push a file (register metadata + get signed upload URL)
       description: |
-        Registers a new version of a file in the environment and returns a
-        short-lived signed PUT URL the CLI uses to upload the (encrypted)
-        blob directly to storage. The DB row is created before the URL is
-        issued — a failed upload leaves an orphan version, not a missing one.
-
-        **MVP status (issue #11):** unencrypted iteration. `content_hash` is
-        the sha256 of the plaintext. M4 will add `wrapped_deks` to the request
-        and make `content_hash` the ciphertext hash.
+        Upserts the (environment_id, path) row and returns a short-lived signed
+        PUT URL the CLI uses to upload the blob directly to storage. Pushing to
+        an existing path overwrites in place and best-effort deletes the prior
+        blob. The DB upsert happens before the URL is issued — a failed upload
+        leaves a row pointing at a missing blob, not the reverse.
       security:
         - bearerAuth: []
       parameters:
@@ -386,7 +383,7 @@ paths:
       summary: Get a signed download URL for a file
       description: |
         Returns a short-lived signed URL (15 min expiry) plus the file's
-        metadata so the CLI can download (and, post-M4, decrypt) it.
+        metadata so the CLI can download it.
       security:
         - bearerAuth: []
       parameters:
@@ -421,68 +418,6 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-
-  /workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}/versions:
-    get:
-      tags: [Files]
-      summary: List versions of a file
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/workspaceId"
-        - $ref: "#/components/parameters/environmentId"
-        - $ref: "#/components/parameters/fileId"
-      responses:
-        "200":
-          description: List of file versions
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  versions:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/FileVersion"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-
-  /workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}/rollback:
-    post:
-      tags: [Files]
-      summary: Rollback a file to a previous version
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/workspaceId"
-        - $ref: "#/components/parameters/environmentId"
-        - $ref: "#/components/parameters/fileId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [version_id]
-              properties:
-                version_id:
-                  type: string
-                  example: ver_9x8y7z
-      responses:
-        "200":
-          description: Rolled back successfully
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/FileMeta"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
 
   # ── ACCESS CONTROL ────────────────────────
 
@@ -594,7 +529,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [push, pull, login, logout, grant, revoke, rollback, delete]
+            enum: [push, pull, login, logout, grant, revoke, delete]
           description: Filter by action type
       responses:
         "200":
@@ -786,7 +721,7 @@ components:
           example: config/example.txt
         content_hash:
           type: string
-          description: SHA-256 hash of the file content (plaintext in MVP, ciphertext post-M4)
+          description: SHA-256 hash of the file content
           example: a1b2c3d4e5f6...
         size:
           type: integer
@@ -809,22 +744,18 @@ components:
           example: config/example.txt
         content_hash:
           type: string
-          description: SHA-256 hash of the file content (plaintext in MVP, ciphertext post-M4). 64 lowercase hex chars.
+          description: SHA-256 hash of the file content. 64 lowercase hex chars.
           example: a1b2c3d4e5f6...
         size:
           type: integer
           description: File size in bytes
           example: 4096
-        message:
-          type: string
-          description: Optional version message
-          example: rotated API token
 
     FilePushResponse:
       type: object
       description: |
-        Returned on successful push. The CLI uploads the (encrypted) blob
-        via a PUT to `upload_url` before the URL expires.
+        Returned on successful push. The CLI uploads the blob via a PUT to
+        `upload_url` before the URL expires.
       properties:
         id:
           type: string
@@ -847,9 +778,6 @@ components:
         pushed_at:
           type: string
           format: date-time
-        version_id:
-          type: string
-          example: ver_9x8y7z
         upload_url:
           type: string
           description: Short-lived signed PUT URL (15 min). Upload the blob here.
@@ -872,7 +800,7 @@ components:
           example: config/example.txt
         content_hash:
           type: string
-          description: Expected SHA-256 hash to verify after download (and post-M4 decryption)
+          description: Expected SHA-256 hash to verify after download
           example: a1b2c3d4e5f6...
         size:
           type: integer
@@ -890,34 +818,6 @@ components:
         download_expires_at:
           type: string
           format: date-time
-
-    FileVersion:
-      type: object
-      properties:
-        id:
-          type: string
-          example: ver_9x8y7z
-        file_id:
-          type: string
-          example: file_xyz789
-        content_hash:
-          type: string
-          example: a1b2c3d4e5f6...
-        size:
-          type: integer
-          example: 4096
-        pushed_by:
-          type: string
-          example: usr_def456
-        pushed_at:
-          type: string
-          format: date-time
-        message:
-          type: string
-          example: updated system prompt
-        is_current:
-          type: boolean
-          example: true
 
     AccessGrant:
       type: object
@@ -976,7 +876,7 @@ components:
           example: kye@invosit.dev
         action:
           type: string
-          enum: [push, pull, login, logout, grant, revoke, rollback, delete]
+          enum: [push, pull, login, logout, grant, revoke, delete]
           example: pull
         file_id:
           type: string

@@ -17,18 +17,10 @@ type pushFileRequest struct {
 	Path        string `json:"path"         validate:"required,max=1024"`
 	ContentHash string `json:"content_hash" validate:"required,len=64"`
 	Size        int64  `json:"size"         validate:"required,gt=0"`
-	Message     string `json:"message"      validate:"max=512"`
 }
 
-// PushFile registers a new version of a file in the environment and returns
-// a short-lived signed PUT URL the client uses to upload the (encrypted)
-// blob directly to storage. The DB row is created before the URL is issued
-// so a failed upload leaves an orphan version, not a missing one — that
-// trade keeps the wire protocol simple and matches the issue spec.
-//
-// In the unencrypted MVP, content_hash is the sha256 of the plaintext.
-// Once M4 lands, the CLI will hash the ciphertext and add wrapped_deks.
 func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
+	// These httpx values are set through middleware
 	uid := httpx.UserID(r.Context())
 	if uid == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
@@ -37,7 +29,6 @@ func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID := httpx.WorkspaceID(r.Context())
 	envID := httpx.EnvironmentID(r.Context())
 	role := httpx.WorkspaceRole(r.Context())
-
 	if role == "viewer" {
 		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "write permission required")
 		return
@@ -61,18 +52,27 @@ func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
 	blobKey := workspaceID + "/" + req.ContentHash
 	pushedAt := time.Now().UTC()
 	fileID := ids.File()
-	versionID := ids.Version()
 
-	tx, err := h.db.BeginTx(r.Context(), nil)
+	transaction, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		httpx.InternalError(w, r, err)
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _ = transaction.Rollback() }()
+
+	// Capture the prior content_hash (if any)
+	var priorHash sql.NullString
+	if err := transaction.QueryRowContext(r.Context(),
+		`SELECT content_hash FROM files WHERE environment_id = $1 AND path = $2 FOR UPDATE`,
+		envID, path,
+	).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		httpx.InternalError(w, r, err)
+		return
+	}
 
 	// Upsert the files row. On conflict (env_id, path) the existing row is
-	// updated to point at the new content; its id is returned either way.
-	err = tx.QueryRowContext(r.Context(),
+	// updated to point at the new content.
+	err = transaction.QueryRowContext(r.Context(),
 		`INSERT INTO files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (environment_id, path) DO UPDATE
@@ -88,28 +88,8 @@ func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Demote the prior current version before inserting the new one — the
-	// partial unique index on file_versions (file_id) WHERE is_current
-	// would otherwise reject the insert.
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE file_versions SET is_current = FALSE WHERE file_id = $1 AND is_current = TRUE`,
-		fileID,
-	); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	if _, err := tx.ExecContext(r.Context(),
-		`INSERT INTO file_versions (id, file_id, blob_key, content_hash, size, pushed_by, pushed_at, message, is_current)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)`,
-		versionID, fileID, blobKey, req.ContentHash, req.Size, uid, pushedAt, nullableString(req.Message),
-	); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
 	// Presign before committing. If signing fails (storage outage, mis-config),
-	// the deferred Rollback discards the version so a subsequent pull doesn't
+	// the deferred Rollback discards the upsert so a subsequent pull doesn't
 	// point at a blob the client was never given a chance to upload.
 	uploadURL, err := h.blobs.SignedPutURL(r.Context(), blobKey, storage.MaxSignedURLExpiry)
 	if err != nil {
@@ -117,9 +97,19 @@ func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := transaction.Commit(); err != nil {
 		httpx.InternalError(w, r, err)
 		return
+	}
+
+	// Best-effort delete of the orphaned prior blob.
+	// Skip when the hash is unchanged (same blob)
+	if priorHash.Valid && priorHash.String != req.ContentHash {
+		priorKey := workspaceID + "/" + priorHash.String
+		if err := h.blobs.Delete(r.Context(), priorKey); err != nil {
+			log.Printf("req=%s prior_blob_delete_failed key=%q err=%v",
+				httpx.RequestID(r.Context()), priorKey, err)
+		}
 	}
 
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
@@ -130,7 +120,6 @@ func (h *Handler) PushFile(w http.ResponseWriter, r *http.Request) {
 		"size":              req.Size,
 		"pushed_by":         uid,
 		"pushed_at":         pushedAt,
-		"version_id":        versionID,
 		"upload_url":        uploadURL,
 		"upload_expires_at": pushedAt.Add(storage.MaxSignedURLExpiry),
 	})
@@ -235,14 +224,8 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DeleteFile removes the files row (cascades to file_versions and
-// wrapped_deks) and best-effort deletes the orphaned blob.
-//
-// In the unencrypted MVP two files in the same workspace can share a
-// blob key (same content_hash → same key). Deleting one would 404 the
-// other. Once encryption lands in M4, per-file DEKs make every ciphertext
-// unique by construction, so the collision goes away. Acceptable for
-// the plumbing-validation iteration.
+// DeleteFile removes the files row (cascades to wrapped_deks) and
+// best-effort deletes the orphaned blob.
 func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	workspaceID := httpx.WorkspaceID(r.Context())
 	envID := httpx.EnvironmentID(r.Context())
@@ -300,203 +283,6 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-type rollbackRequest struct {
-	VersionID string `json:"version_id" validate:"required,startswith=ver_,max=64"`
-}
-
-// Returns the version history of a file, newest first.
-func (h *Handler) ListVersions(w http.ResponseWriter, r *http.Request) {
-	envID := httpx.EnvironmentID(r.Context())
-	fileID := r.PathValue("fileId")
-	if fileID == "" {
-		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-		return
-	}
-
-	var exists string
-	err := h.db.QueryRowContext(r.Context(),
-		`SELECT id FROM files WHERE id = $1 AND environment_id = $2`,
-		fileID, envID,
-	).Scan(&exists)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-			return
-		}
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, file_id, content_hash, size, pushed_by, pushed_at, message, is_current
-		   FROM file_versions
-		  WHERE file_id = $1
-		  ORDER BY pushed_at DESC, id DESC`,
-		fileID,
-	)
-	if err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-	defer func() { _ = rows.Close() }()
-
-	versions := []map[string]any{}
-	for rows.Next() {
-		var (
-			id, fileIDOut, hash string
-			size                int64
-			pushedBy, message   sql.NullString
-			pushedAt            time.Time
-			isCurrent           bool
-		)
-		if err := rows.Scan(&id, &fileIDOut, &hash, &size, &pushedBy, &pushedAt, &message, &isCurrent); err != nil {
-			httpx.InternalError(w, r, err)
-			return
-		}
-		versions = append(versions, map[string]any{
-			"id":           id,
-			"file_id":      fileIDOut,
-			"content_hash": hash,
-			"size":         size,
-			"pushed_by":    pushedBy.String,
-			"pushed_at":    pushedAt,
-			"message":      message.String,
-			"is_current":   isCurrent,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"versions": versions})
-}
-
-// Moves is_current pointer to a prior version and mirrors the target
-// version's content metadata onto the parent files row.
-func (h *Handler) RollbackFile(w http.ResponseWriter, r *http.Request) {
-	uid := httpx.UserID(r.Context())
-	if uid == "" {
-		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
-		return
-	}
-	envID := httpx.EnvironmentID(r.Context())
-	role := httpx.WorkspaceRole(r.Context())
-	fileID := r.PathValue("fileId")
-	if fileID == "" {
-		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-		return
-	}
-	if role == "viewer" {
-		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "write permission required")
-		return
-	}
-
-	var req rollbackRequest
-	if err := httpx.Bind(r, &req); err != nil {
-		httpx.RespondError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid rollback request")
-		return
-	}
-
-	tx, err := h.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Lock the parent file row up front to serialise concurrent rollbacks
-	// against the same file. Without this, two rollbacks targeting different
-	// versions can each lock their own target row, then race on the demote
-	// step: in READ COMMITTED the second one's snapshot misses the first's
-	// freshly-promoted row, its predicate-based demote affects nothing, and
-	// its promote then violates the partial unique index on
-	// file_versions (file_id) WHERE is_current.
-	var path string
-	err = tx.QueryRowContext(r.Context(),
-		`SELECT path FROM files WHERE id = $1 AND environment_id = $2 FOR UPDATE`,
-		fileID, envID,
-	).Scan(&path)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-			return
-		}
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	// Pull and lock the target version. FOR UPDATE serialises concurrent
-	// rollbacks against the same target so the demote/promote sequence stays
-	// consistent — without it two simultaneous rollbacks could race against
-	// the partial unique index on is_current.
-	var (
-		targetHash     string
-		targetSize     int64
-		targetPushedBy sql.NullString
-		targetPushedAt time.Time
-	)
-	err = tx.QueryRowContext(r.Context(),
-		`SELECT content_hash, size, pushed_by, pushed_at
-		   FROM file_versions
-		  WHERE id = $1 AND file_id = $2
-		  FOR UPDATE`,
-		req.VersionID, fileID,
-	).Scan(&targetHash, &targetSize, &targetPushedBy, &targetPushedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.RespondError(w, http.StatusNotFound, "NOT_FOUND", "version not found")
-			return
-		}
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	// Demote before promoting. The partial unique index on
-	// file_versions (file_id) WHERE is_current would reject the promote
-	// otherwise.
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE file_versions SET is_current = FALSE WHERE file_id = $1 AND is_current = TRUE`,
-		fileID,
-	); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE file_versions SET is_current = TRUE WHERE id = $1`,
-		req.VersionID,
-	); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	// Mirror the target version's original metadata onto the parent row.
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE files
-		    SET content_hash = $1, size = $2, pushed_by = $3, pushed_at = $4
-		  WHERE id = $5`,
-		targetHash, targetSize, targetPushedBy, targetPushedAt, fileID,
-	); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		httpx.InternalError(w, r, err)
-		return
-	}
-
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"id":             fileID,
-		"environment_id": envID,
-		"path":           path,
-		"content_hash":   targetHash,
-		"size":           targetSize,
-		"pushed_by":      targetPushedBy.String,
-		"pushed_at":      targetPushedAt,
-	})
-}
-
 // reject "..", absolute paths, null bytes, and leading separators.
 func validateFilePath(p string) error {
 	if p == "" {
@@ -534,11 +320,4 @@ func validateSha256Hex(s string) error {
 		}
 	}
 	return nil
-}
-
-func nullableString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
