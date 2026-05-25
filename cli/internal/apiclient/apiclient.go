@@ -1,6 +1,7 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,5 +130,58 @@ func (c *Client) GetEnvironments(ctx context.Context, token string, workspaceID 
 		return nil, ErrUnauthorized
 	default:
 		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+	}
+}
+
+type PushFileRequest struct {
+	Path        string `json:"path"`
+	ContentHash string `json:"content_hash"`
+	Size        int64  `json:"size"`
+}
+
+type PushFileResponse struct {
+	ID              string    `json:"id"`
+	EnvironmentID   string    `json:"environment_id"`
+	Path            string    `json:"path"`
+	ContentHash     string    `json:"content_hash"`
+	Size            int64     `json:"size"`
+	PushedBy        string    `json:"pushed_by"`
+	PushedAt        time.Time `json:"pushed_at"`
+	UploadURL       string    `json:"upload_url"`
+	UploadExpiresAt time.Time `json:"upload_expires_at"`
+}
+
+func (c *Client) PushFile(ctx context.Context, token, workspaceID, environmentID string, req PushFileRequest) (PushFileResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return PushFileResponse{}, fmt.Errorf("encode push request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files", c.baseURL, workspaceID, environmentID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return PushFileResponse{}, fmt.Errorf("build push request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	res, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return PushFileResponse{}, fmt.Errorf("push request failed: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	switch res.StatusCode {
+	case http.StatusCreated:
+		var decoded PushFileResponse
+		if err := json.NewDecoder(res.Body).Decode(&decoded); err != nil {
+			return PushFileResponse{}, fmt.Errorf("decode push response: %w", err)
+		}
+		return decoded, nil
+	case http.StatusUnauthorized:
+		return PushFileResponse{}, ErrUnauthorized
+	default:
+		return PushFileResponse{}, fmt.Errorf("unexpected status: %d", res.StatusCode)
 	}
 }

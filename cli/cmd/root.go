@@ -36,5 +36,8 @@ func resolveConfigPath() string {
 	if configPathFlag != "" {
 		return configPathFlag
 	}
+	if found, err := config.Find("."); err == nil {
+		return found
+	}
 	return config.FileName
 }
