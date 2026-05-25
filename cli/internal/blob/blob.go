@@ -9,7 +9,7 @@ import (
 
 var httpClient = &http.Client{}
 
-// Upload sends a POST request to the s3 signed URL
+// Upload sends a PUT request to the s3 signed URL
 func Upload(ctx context.Context, signedURL string, body io.Reader, size int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL, body)
 	if err != nil {

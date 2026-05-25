@@ -111,6 +111,7 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 		return err
 	}
 
+	// TODO: Hash with TeeReader
 	hash, size, err := hashFile(absPath)
 	if err != nil {
 		return err
