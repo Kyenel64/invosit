@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
-var httpClient = &http.Client{}
+var httpClient = &http.Client{Timeout: 5 * time.Minute}
 
 // Upload sends a PUT request to the s3 signed URL
 func Upload(ctx context.Context, signedURL string, body io.Reader, size int64) error {
