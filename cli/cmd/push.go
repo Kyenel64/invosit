@@ -97,10 +97,21 @@ func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspac
 }
 
 func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRelPath, relPath string) error {
-	// TODO: Hash with TeeReader
-	hash, size, err := hashFile(relPath)
+	file, err := os.Open(relPath) //nolint:gosec
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, file)
+	if err != nil {
+		return fmt.Errorf("failed to hash file: %w", err)
+	}
+	hash := hex.EncodeToString(hasher.Sum(nil))
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to rewind file: %w", err)
 	}
 
 	res, err := client.PushFile(ctx, token, workspaceID, envID, apiclient.PushFileRequest{
@@ -114,12 +125,6 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 		}
 		return fmt.Errorf("failed to register file with api: %w", err)
 	}
-
-	file, err := os.Open(relPath) //nolint:gosec
-	if err != nil {
-		return fmt.Errorf("failed to open file for upload: %w", err)
-	}
-	defer func() { _ = file.Close() }()
 
 	if err := blob.Upload(ctx, res.UploadURL, file, size); err != nil {
 		return fmt.Errorf("failed to upload blob: %w", err)
@@ -152,19 +157,4 @@ func projectRelative(projectRoot, relPath string) (string, error) {
 		return "", errors.New("file is outside the project tree")
 	}
 	return rel, nil
-}
-
-func hashFile(relPath string) (string, int64, error) {
-	file, err := os.Open(relPath) //nolint:gosec
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	hasher := sha256.New()
-	size, err := io.Copy(hasher, file)
-	if err != nil {
-		return "", 0, fmt.Errorf("failed to hash file: %w", err)
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
