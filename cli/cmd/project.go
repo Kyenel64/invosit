@@ -3,11 +3,12 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/kyenel64/invosit/cli/internal/config"
 )
 
-// loadProjectConfig returns the closest .invosit.json file from cwd, and its path
+// loadProjectConfig returns the closest invosit config and the abs path of project root
 func loadProjectConfig() (*config.Config, string, error) {
 	configPath, err := config.Find(".")
 	if err != nil {
@@ -20,5 +21,5 @@ func loadProjectConfig() (*config.Config, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
-	return cfg, configPath, nil
+	return cfg, filepath.Dir(configPath), nil
 }

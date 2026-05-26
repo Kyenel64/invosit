@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
@@ -22,6 +21,9 @@ var pushEnvFlag string
 var pushCmd = &cobra.Command{
 	Use:   "push <path> [path...]",
 	Short: "Push file(s) to invosit",
+	Long: `Push local files to invosit.
+Uses the nearest .invosit.json file as project root.
+	`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
 			return errors.New("pass at least one file to push")
@@ -34,11 +36,10 @@ var pushCmd = &cobra.Command{
 			return err
 		}
 
-		cfg, configPath, err := loadProjectConfig()
+		cfg, projectRoot, err := loadProjectConfig()
 		if err != nil {
 			return err
 		}
-		projectRoot := filepath.Dir(configPath)
 
 		envName := pushEnvFlag
 		if envName == "" {
@@ -57,10 +58,13 @@ var pushCmd = &cobra.Command{
 		failed := 0
 		// TODO: batch push files
 		for _, arg := range args {
-			if err := pushOne(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envID, projectRoot, arg); err != nil {
+			projectRelPath, err := projectRelative(projectRoot, arg)
+			if err == nil {
+				err = pushOne(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envID, projectRelPath, arg)
+			}
+			if err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "failed to push %s: %v\n", arg, err)
 				failed++
-				continue
 			}
 		}
 
@@ -92,15 +96,7 @@ func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspac
 	return "", fmt.Errorf("environment %q not found in workspace", name)
 }
 
-func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRoot, relPath string) error {
-	storedPath, err := projectRelative(projectRoot, relPath)
-	if err != nil {
-		return err
-	}
-	if err := validateStoredPath(storedPath); err != nil {
-		return err
-	}
-
+func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRelPath, relPath string) error {
 	// TODO: Hash with TeeReader
 	hash, size, err := hashFile(relPath)
 	if err != nil {
@@ -108,7 +104,7 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 	}
 
 	res, err := client.PushFile(ctx, token, workspaceID, envID, apiclient.PushFileRequest{
-		Path:        storedPath,
+		Path:        projectRelPath,
 		ContentHash: hash,
 		Size:        size,
 	})
@@ -129,17 +125,25 @@ func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, 
 		return fmt.Errorf("failed to upload blob: %w", err)
 	}
 
-	fmt.Printf("pushed %s (%d bytes)\n", storedPath, size)
+	fmt.Printf("pushed %s (%d bytes)\n", projectRelPath, size)
 	return nil
 }
 
-// projectRelative returns filepath relative to project root.
+// projectRelative constructs an invosit-valid path relative to project root
 func projectRelative(projectRoot, relPath string) (string, error) {
-	absArg, err := filepath.Abs(relPath)
+	absPath, err := filepath.Abs(relPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve path: %w", err)
 	}
-	rel, err := filepath.Rel(projectRoot, absArg)
+	realProjectRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve project root: %w", err)
+	}
+	realAbsPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve path: %w", err)
+	}
+	rel, err := filepath.Rel(realProjectRoot, realAbsPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve project-relative path: %w", err)
 	}
@@ -148,25 +152,6 @@ func projectRelative(projectRoot, relPath string) (string, error) {
 		return "", errors.New("file is outside the project tree")
 	}
 	return rel, nil
-}
-
-// validateStoredPath checks that the filepath is a valid path for invosit.
-func validateStoredPath(path string) error {
-	if path == "" {
-		return errors.New("path is empty")
-	}
-	if strings.ContainsRune(path, 0) {
-		return errors.New("path contains a null byte")
-	}
-	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
-		return errors.New("path must be relative, not absolute")
-	}
-	for _, sep := range []string{"/", "\\"} {
-		if slices.Contains(strings.Split(path, sep), "..") {
-			return errors.New("path contains traversal (..) segments")
-		}
-	}
-	return nil
 }
 
 func hashFile(relPath string) (string, int64, error) {
