@@ -1,0 +1,32 @@
+name: Label from component dropdown
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add component label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          component=$(printf '%s\n' "$ISSUE_BODY" \
+            | awk '/^### Component$/{found=1; next} found && NF{print; exit}' \
+            | tr -d '[:space:]')
+
+          case "$component" in
+            api|cli|frontend|documentation|infra)
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "$component"
+              ;;
+            *)
+              echo "No matching component label for: '$component'"
+              ;;
+          esac
