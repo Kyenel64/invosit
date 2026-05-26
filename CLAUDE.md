@@ -13,14 +13,9 @@ It lets teams push and pull encrypted files alongside a repo without committing
 them. A small config file (`.invosit.json`) is committed to git, binding the
 directory to a workspace and optionally recording a `defaultEnvironment` the
 team agrees on. Every `push`/`pull` accepts `--env <name>` to override that
-default. The API is the source of truth for which files exist in a given
-`(workspace, environment)` pair; the actual file content lives in encrypted
-blob storage and is pulled down by teammates via the CLI.
+default. File content lives in encrypted blob storage and is pulled down via the CLI.
 
-Think of it as "Infisical but for arbitrary files" — the same auth model,
-workspace concept, and CLI pattern, but for files instead of env vars.
-
-**Tagline:** Encrypted file sync for files that shouldn't be in git.
+**Tagline:** Share gitignored files with your team.
 
 **Security is the core value proposition.** Every design decision should be
 evaluated through a security lens first. When in doubt, choose the more
@@ -335,8 +330,6 @@ Built on Cobra; structured the same way as the API server with thin
   queried for the file inventory on every push/pull, so dashboard uploads
   and CLI pushes share one source of truth and the file *names* aren't
   leaked into git.
-- **Global `--config <path>` flag** on `rootCmd` overrides the discovered
-  config path; when set, commands skip walk-up and use the given file.
 - **API client** — `internal/apiclient` exposes `Me`, `GetWorkspaces`, and
   `GetEnvironments` over Bearer-token auth.
 
@@ -351,7 +344,7 @@ login through the CLI is not a planned feature.
 
 ### Planned
 
-- **`invosit add <file>` / `invosit push` / `invosit pull`.** `add` registers a new file with the API and uploads it. `push` queries the API for tracked files in the target environment, hashes locals, and re-uploads changed ones. `pull` queries the API for every tracked file and downloads them via signed URLs. All three accept `--env <name>`; when omitted they use the config's `defaultEnvironment` (and error if neither is set). The config is never the inventory — the API is. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
+- **`invosit push` / `invosit pull`.** `push` uploads files: paths passed as args are uploaded directly (new files are created, existing files updated when the local SHA-256 differs from the API's). With no args, `push` queries the API for tracked files in the target environment, hashes locals, and re-uploads changed ones. `pull` queries the API for every tracked file and downloads them via signed URLs. Both accept `--env <name>`; when omitted they use the config's `defaultEnvironment` (and error if neither is set). The config is never the inventory — the API is. There is no separate `add` command — the API's `POST .../files` is an upsert, so `push` covers both creating and updating. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
 - **Encryption boundary.** All AES-256-GCM encryption/decryption of file contents happens here, not in the API. Generates per-file DEKs and wraps each with the recipient's public key (sourced from `users.public_key` via the API).
 - **Storage I/O.** Uploads/downloads encrypted blobs **directly** to the storage provider using short-lived signed URLs issued by the API. Bytes never pass through the API server.
 - **Local key material.** Generates and stores the user's keypair locally; the public key gets registered with the API on first run, the private key never leaves the machine.

@@ -24,6 +24,8 @@ type Config struct {
 
 var ErrNotFound = errors.New("invosit config not found")
 
+// Find walks up parent directories to return the absolute path
+// of the nearest .invosit.json config file.
 func Find(startDir string) (string, error) {
 	dir, err := filepath.Abs(startDir)
 	if err != nil {
