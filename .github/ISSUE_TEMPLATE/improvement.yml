@@ -1,0 +1,42 @@
+name: Improvement
+description: Suggest an enhancement to existing functionality
+title: "Improvement: "
+labels: ["Improvement"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Invosit would this improve?
+      options:
+        - api
+        - cli
+        - frontend
+        - documentation
+        - infra
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: How does it work today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed improvement
+      description: What should change, and how would it be better?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Optional — examples, links, related issues.
+    validations:
+      required: false
