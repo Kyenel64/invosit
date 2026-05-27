@@ -29,13 +29,13 @@ type fileMeta struct {
 // --- Create Files ----------------------------------------------------------
 
 type createFileRequest struct {
-	Path        string `json:"path"         validate:"required,max=1024"`
-	ContentHash string `json:"content_hash" validate:"required,len=64"`
-	Size        int64  `json:"size"         validate:"required,gt=0"`
+	Path        string `json:"path"`
+	ContentHash string `json:"content_hash"`
+	Size        int64  `json:"size"`
 }
 
 type createFilesRequest struct {
-	Files []createFileRequest `json:"files" validate:"required,dive"`
+	Files []createFileRequest `json:"files" validate:"required"`
 }
 
 type createFilesResult struct {
@@ -98,6 +98,9 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 	}
 	if err := validateSha256Hex(entry.ContentHash); err != nil {
 		return createErrorResult(path, "INVALID_REQUEST", "invalid content hash")
+	}
+	if entry.Size <= 0 {
+		return createErrorResult(path, "INVALID_REQUEST", "invalid size")
 	}
 
 	pushedAt := time.Now().UTC()
@@ -214,20 +217,25 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		size                    int64
 		pushedBy                sql.NullString
 		pushedAt                time.Time
+		completedFileID         sql.NullString
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at
+		`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id
 		   FROM pending_files
 		  WHERE id = $1 AND environment_id = $2
 		    FOR UPDATE`,
 		fileID, envID,
-	).Scan(&workspaceID, &path, &hash, &size, &pushedBy, &pushedAt)
+	).Scan(&workspaceID, &path, &hash, &size, &pushedBy, &pushedAt, &completedFileID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return h.completeAlreadyDone(ctx, envID, fileID)
 		}
 		log.Printf("req=%s complete_files_select_pending_failed err=%v", httpx.RequestID(ctx), err)
 		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	if completedFileID.Valid {
+		return h.completeAlreadyDone(ctx, envID, completedFileID.String)
 	}
 
 	var committedID string
@@ -247,9 +255,10 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM pending_files WHERE id = $1`, fileID,
+		`UPDATE pending_files SET completed_file_id = $1 WHERE id = $2`,
+		committedID, fileID,
 	); err != nil {
-		log.Printf("req=%s complete_files_delete_pending_failed err=%v", httpx.RequestID(ctx), err)
+		log.Printf("req=%s complete_files_mark_completed_failed err=%v", httpx.RequestID(ctx), err)
 		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
 	}
 
@@ -492,6 +501,9 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 func validateFilePath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
+	}
+	if len(p) > 1024 {
+		return errors.New("path too long")
 	}
 	if strings.ContainsRune(p, 0) {
 		return errors.New("null byte in path")

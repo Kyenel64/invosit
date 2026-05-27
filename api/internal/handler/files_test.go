@@ -544,6 +544,49 @@ func TestCreateFiles_RejectsBadHashes(t *testing.T) {
 	}
 }
 
+// Structurally-bad entries (zero size, wrong-length hash, oversized
+// path) must be reported as per-entry errors, not as a top-level 400 —
+// otherwise a single bad entry would reject the whole batch.
+func TestCreateFiles_StructurallyBadEntriesArePerEntry(t *testing.T) {
+	cases := map[string]map[string]any{
+		"zero size":         {"path": "a.env", "content_hash": validHash, "size": 0},
+		"wrong-length hash": {"path": "a.env", "content_hash": "tooshort", "size": 1},
+		"oversized path":    {"path": strings.Repeat("a/", 600), "content_hash": validHash, "size": 1},
+	}
+	for name, badEntry := range cases {
+		t.Run(name, func(t *testing.T) {
+			db, mock, _ := sqlmock.New()
+			defer db.Close()
+			expectPendingInsert(mock, "file_ok")
+
+			h := &Handler{db: db, blobs: &stubStorage{putURL: "https://signed/put"}}
+			body, _ := json.Marshal(map[string]any{
+				"files": []map[string]any{
+					{"path": "ok.env", "content_hash": validHash, "size": 1},
+					badEntry,
+				},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(string(body))).WithContext(pushCtx())
+			rec := httptest.NewRecorder()
+			h.CreateFiles(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body = %s)", rec.Code, rec.Body.String())
+			}
+			var got struct {
+				Results []map[string]any `json:"results"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &got)
+			if got.Results[0]["status"] != "ok" {
+				t.Errorf("good entry should succeed, got %+v", got.Results[0])
+			}
+			if got.Results[1]["status"] != "error" || got.Results[1]["code"] != "INVALID_REQUEST" {
+				t.Errorf("bad entry should be per-entry INVALID_REQUEST, got %+v", got.Results[1])
+			}
+		})
+	}
+}
+
 func TestCreateFiles_InsertFailure(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
@@ -601,28 +644,21 @@ func TestCreateFiles_PresignFailure(t *testing.T) {
 func expectCompleteMove(mock sqlmock.Sqlmock, fileID, path, hash string) {
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at\s+FROM pending_files`).
+	mock.ExpectQuery(`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id\s+FROM pending_files`).
 		WithArgs(fileID, "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"workspace_id", "path", "content_hash", "size", "pushed_by", "pushed_at"}).
-			AddRow("ws_abc", path, hash, int64(100), "usr_abc", pushedAt))
+		WillReturnRows(sqlmock.NewRows([]string{"workspace_id", "path", "content_hash", "size", "pushed_by", "pushed_at", "completed_file_id"}).
+			AddRow("ws_abc", path, hash, int64(100), "usr_abc", pushedAt, nil))
 	mock.ExpectQuery(`INSERT INTO files`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(fileID))
-	mock.ExpectExec(`DELETE FROM pending_files WHERE id = \$1`).
-		WithArgs(fileID).
+	mock.ExpectExec(`UPDATE pending_files SET completed_file_id = \$1 WHERE id = \$2`).
+		WithArgs(fileID, fileID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 }
 
-// expectCompleteNoPending mocks the no-pending path: BEGIN → SELECT
-// pending returns no rows → fall back to SELECT from files (idempotent
-// success or FORBIDDEN depending on whether a committed row exists) →
-// the deferred Rollback fires when completeOne returns.
-//
-// committed=true means "already committed, idempotent success".
-// committed=false means "genuinely unknown id, FORBIDDEN".
 func expectCompleteNoPending(mock sqlmock.Sqlmock, fileID, path, hash string, committed bool) {
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at\s+FROM pending_files`).
+	mock.ExpectQuery(`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id\s+FROM pending_files`).
 		WithArgs(fileID, "env_abc").
 		WillReturnError(sql.ErrNoRows)
 	if committed {
@@ -636,6 +672,24 @@ func expectCompleteNoPending(mock sqlmock.Sqlmock, fileID, path, hash string, co
 			WithArgs(fileID, "env_abc").
 			WillReturnError(sql.ErrNoRows)
 	}
+	mock.ExpectRollback()
+}
+
+// expectCompleteRetry mocks the retry-after-replacement path: BEGIN →
+// SELECT pending returns a row whose completed_file_id points at the
+// committed file → fall back to SELECT files by that committed id →
+// Rollback fires when completeOne returns.
+func expectCompleteRetry(mock sqlmock.Sqlmock, pendingID, committedID, path, hash string) {
+	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id\s+FROM pending_files`).
+		WithArgs(pendingID, "env_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"workspace_id", "path", "content_hash", "size", "pushed_by", "pushed_at", "completed_file_id"}).
+			AddRow("ws_abc", path, hash, int64(100), "usr_abc", pushedAt, committedID))
+	mock.ExpectQuery(`SELECT path, content_hash, size, pushed_by, pushed_at\s+FROM files`).
+		WithArgs(committedID, "env_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "pushed_by", "pushed_at"}).
+			AddRow(path, hash, int64(100), "usr_abc", pushedAt))
 	mock.ExpectRollback()
 }
 
@@ -678,9 +732,6 @@ func TestCompleteFiles_Success(t *testing.T) {
 	}
 }
 
-// Completing an already-committed file (no row in pending_files) is a
-// no-op success — the handler falls back to reading from `files` and
-// returns the committed row.
 func TestCompleteFiles_Idempotent(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
@@ -702,6 +753,40 @@ func TestCompleteFiles_Idempotent(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.Results[0]["status"] != "ok" {
 		t.Errorf("status = %v, want ok", got.Results[0]["status"])
+	}
+}
+
+// Retrying :complete with the original pending id after a replacement
+// upload (pending id != committed id) returns the committed file via the
+// soft-deleted pending row's completed_file_id pointer.
+func TestCompleteFiles_RetryAfterReplacement(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	expectCompleteRetry(mock, "file_new", "file_existing", "config/.env", validHash)
+
+	h := &Handler{db: db, blobs: &stubStorage{}}
+	body := `{"file_ids":["file_new"]}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.CompleteFiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Results []map[string]any `json:"results"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Results[0]["status"] != "ok" {
+		t.Errorf("status = %v, want ok", got.Results[0]["status"])
+	}
+	file, ok := got.Results[0]["file"].(map[string]any)
+	if !ok {
+		t.Fatalf("file missing")
+	}
+	if file["id"] != "file_existing" {
+		t.Errorf("file.id = %v, want file_existing (the committed id, not the pending id)", file["id"])
 	}
 }
 
