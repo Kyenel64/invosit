@@ -330,14 +330,22 @@ paths:
       tags: [Files]
       summary: Phase 1 — register pending files + receive signed upload URLs
       description: |
-        Phase 1 of the two-phase upload. For each entry, inserts a row in
-        the `files` table with `status='pending'` and returns a short-lived
-        signed PUT URL. The CLI uploads bytes directly to storage. Pending
-        rows are invisible to reads until the CLI calls POST .../files:complete
-        to promote them to `status='committed'`.
+        Phase 1 of the two-phase upload. For each entry, inserts a row
+        in the `pending_files` table and returns a short-lived signed
+        PUT URL. The committed `files` table is **not** touched here,
+        so any previously committed version of the same path stays
+        visible to reads throughout the upload.
 
-        Orphan blob cleanup (failed/abandoned uploads) is handled by a
-        separate sweep job, not inline here.
+        When the CLI calls POST .../files:complete after the S3 PUT
+        succeeds, the pending row is moved into `files` (UPSERT by
+        env+path, deletes the pending row).
+
+        Concurrent uploads to the same path coexist as separate
+        pending_files entries — only the one that reaches :complete
+        last wins on the committed table.
+
+        Stale pending entries (CLI dies before :complete) are cleaned
+        up by the orphan-blob sweep job (#62).
 
         Per-entry validation or DB failures are reported in the results
         array; only auth, role, and batch-cap violations 4xx the outer
@@ -374,13 +382,18 @@ paths:
   /workspaces/{workspaceId}/environments/{environmentId}/files:complete:
     post:
       tags: [Files]
-      summary: Phase 2 — confirm S3 upload, promote rows to committed
+      summary: Phase 2 — confirm S3 upload, move pending row into committed files
       description: |
-        Phase 2 of the two-phase upload. For each `file_id`, transitions
-        the row from `pending` to `committed` so it becomes visible to
-        reads. Idempotent — completing an already-committed file is a
-        no-op success. Unknown ids (or ids from a different environment)
-        return per-entry `FORBIDDEN`.
+        Phase 2 of the two-phase upload. For each `file_id`, moves the
+        matching row from `pending_files` into `files` (UPSERT by env+path
+        so an existing committed file at the same path gets updated in
+        place) and deletes the pending entry. After this, the file is
+        visible to reads.
+
+        Idempotent — if there is no pending entry but a committed file
+        already exists at this id, the existing committed row is
+        returned unchanged. Unknown ids, or ids from a different
+        environment, return per-entry `FORBIDDEN`.
       security:
         - bearerAuth: []
       parameters:
@@ -744,9 +757,11 @@ components:
     FileMeta:
       type: object
       description: |
-        Base file metadata. `status` is `pending` for rows created by
-        POST /files but not yet confirmed; `committed` once the CLI has
-        called POST /files:complete.
+        File metadata. Returned inside CreateFiles results (describing
+        the pending row that was just inserted) and CompleteFiles
+        results (describing the freshly committed file). Pending uploads
+        live in a separate `pending_files` table — they are never
+        returned by GET /files or GET /files/{id}.
       properties:
         id:
           type: string
@@ -772,16 +787,13 @@ components:
         pushed_at:
           type: string
           format: date-time
-        status:
-          type: string
-          enum: [pending, committed]
-          example: committed
 
     ListedFileMeta:
       description: |
         FileMeta plus a short-lived signed GET URL. Returned by GET /files
-        (list items) and GET /files/{id} (single). `status` is always
-        `committed` because pending rows are filtered from reads.
+        (list items) and GET /files/{id} (single). The `files` table only
+        contains committed files — pending uploads live in a separate
+        table and never appear in reads.
       allOf:
         - $ref: "#/components/schemas/FileMeta"
         - type: object
@@ -836,7 +848,7 @@ components:
           enum: [ok]
         file:
           $ref: "#/components/schemas/FileMeta"
-          description: The newly inserted row. `status` is `pending` until POST /files:complete.
+          description: The pending row that was just inserted into pending_files. Becomes the committed file row once POST /files:complete is called.
         upload_url:
           type: string
           description: Short-lived signed PUT URL (15 min). Upload the blob here, then call POST /files:complete.
@@ -907,7 +919,7 @@ components:
           enum: [ok]
         file:
           $ref: "#/components/schemas/FileMeta"
-          description: The updated row, now with `status='committed'`.
+          description: The freshly committed file metadata.
 
     CompleteFilesResultError:
       type: object

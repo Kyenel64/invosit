@@ -24,7 +24,6 @@ type fileMeta struct {
 	Size          int64     `json:"size"`
 	PushedBy      string    `json:"pushed_by"`
 	PushedAt      time.Time `json:"pushed_at"`
-	Status        string    `json:"status"`
 }
 
 // --- Create Files ----------------------------------------------------------
@@ -53,9 +52,8 @@ type createFilesResponse struct {
 	Results []createFilesResult `json:"results"`
 }
 
-// CreateFiles batch creates db metadata entries for the files requested and returns a list of signed urls for file upload.
-// files are entered in db as 'pending' while the client is uploading file blob to s3.
-// client must call /files:complete after successful s3 upload using the signed url.
+// CreateFiles batch creates file metadata and returns s3 signed urls for each requested file for the client to upload.
+// Each file metadata is first inserted to the pending_files table in the db until client uploads and calls /files:complete
 func (h *Handler) CreateFiles(w http.ResponseWriter, r *http.Request) {
 	uid := httpx.UserID(r.Context())
 	if uid == "" {
@@ -105,19 +103,12 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 	pushedAt := time.Now().UTC()
 	fileID := ids.File()
 
-	if err := h.db.QueryRowContext(ctx,
-		`INSERT INTO files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
-		 ON CONFLICT (environment_id, path) DO UPDATE
-		   SET content_hash = EXCLUDED.content_hash,
-		       size         = EXCLUDED.size,
-		       pushed_by    = EXCLUDED.pushed_by,
-		       pushed_at    = EXCLUDED.pushed_at,
-		       status       = 'pending'
-		 RETURNING id`,
+	if _, err := h.db.ExecContext(ctx,
+		`INSERT INTO pending_files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		fileID, workspaceID, envID, path, entry.ContentHash, entry.Size, uid, pushedAt,
-	).Scan(&fileID); err != nil {
-		log.Printf("req=%s create_files_upsert_failed err=%v", httpx.RequestID(ctx), err)
+	); err != nil {
+		log.Printf("req=%s create_files_insert_failed err=%v", httpx.RequestID(ctx), err)
 		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
 	}
 
@@ -139,7 +130,6 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 			Size:          entry.Size,
 			PushedBy:      uid,
 			PushedAt:      pushedAt,
-			Status:        "pending",
 		},
 		UploadURL:       uploadURL,
 		UploadExpiresAt: &expiresAt,
@@ -173,6 +163,7 @@ type completeFilesResponse struct {
 	Results []completeFilesResult `json:"results"`
 }
 
+// CompleteFiles moves files from the pending_files table to the files table
 func (h *Handler) CompleteFiles(w http.ResponseWriter, r *http.Request) {
 	if httpx.UserID(r.Context()) == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
@@ -211,27 +202,97 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		return completeErrorResult(fileID, "FORBIDDEN", "access denied")
 	}
 
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("req=%s complete_files_begin_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var (
-		path, hash, status string
-		size               int64
-		pushedBy           sql.NullString
-		pushedAt           time.Time
+		workspaceID, path, hash string
+		size                    int64
+		pushedBy                sql.NullString
+		pushedAt                time.Time
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at
+		   FROM pending_files
+		  WHERE id = $1 AND environment_id = $2
+		    FOR UPDATE`,
+		fileID, envID,
+	).Scan(&workspaceID, &path, &hash, &size, &pushedBy, &pushedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return h.completeAlreadyDone(ctx, envID, fileID)
+		}
+		log.Printf("req=%s complete_files_select_pending_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	var committedID string
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (environment_id, path) DO UPDATE
+		   SET content_hash = EXCLUDED.content_hash,
+		       size         = EXCLUDED.size,
+		       pushed_by    = EXCLUDED.pushed_by,
+		       pushed_at    = EXCLUDED.pushed_at
+		 RETURNING id`,
+		fileID, workspaceID, envID, path, hash, size, pushedBy.String, pushedAt,
+	).Scan(&committedID); err != nil {
+		log.Printf("req=%s complete_files_upsert_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM pending_files WHERE id = $1`, fileID,
+	); err != nil {
+		log.Printf("req=%s complete_files_delete_pending_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("req=%s complete_files_commit_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	return completeFilesResult{
+		ID:     committedID,
+		Status: "ok",
+		File: &fileMeta{
+			ID:            committedID,
+			EnvironmentID: envID,
+			Path:          path,
+			ContentHash:   hash,
+			Size:          size,
+			PushedBy:      pushedBy.String,
+			PushedAt:      pushedAt,
+		},
+	}
+}
+
+func (h *Handler) completeAlreadyDone(ctx context.Context, envID, fileID string) completeFilesResult {
+	var (
+		path, hash string
+		size       int64
+		pushedBy   sql.NullString
+		pushedAt   time.Time
 	)
 	err := h.db.QueryRowContext(ctx,
-		`UPDATE files
-		    SET status = 'committed'
-		  WHERE id = $1 AND environment_id = $2
-		  RETURNING path, content_hash, size, pushed_by, pushed_at, status`,
+		`SELECT path, content_hash, size, pushed_by, pushed_at
+		   FROM files
+		  WHERE id = $1 AND environment_id = $2`,
 		fileID, envID,
-	).Scan(&path, &hash, &size, &pushedBy, &pushedAt, &status)
+	).Scan(&path, &hash, &size, &pushedBy, &pushedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return completeErrorResult(fileID, "FORBIDDEN", "access denied")
 		}
-		log.Printf("req=%s complete_files_update_failed err=%v", httpx.RequestID(ctx), err)
+		log.Printf("req=%s complete_files_select_committed_failed err=%v", httpx.RequestID(ctx), err)
 		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
 	}
-
 	return completeFilesResult{
 		ID:     fileID,
 		Status: "ok",
@@ -243,7 +304,6 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 			Size:          size,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
-			Status:        status,
 		},
 	}
 }
@@ -280,7 +340,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, path, content_hash, size, pushed_by, pushed_at
 		   FROM files
-		  WHERE environment_id = $1 AND status = 'committed'
+		  WHERE environment_id = $1
 		  ORDER BY path ASC`,
 		envID,
 	)
@@ -316,7 +376,6 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 				Size:          size,
 				PushedBy:      pushedBy.String,
 				PushedAt:      pushedAt,
-				Status:        "committed",
 			},
 			DownloadURL:       downloadURL,
 			DownloadExpiresAt: time.Now().UTC().Add(storage.MaxSignedURLExpiry),
@@ -352,7 +411,7 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT path, content_hash, size, pushed_by, pushed_at
 		   FROM files
-		  WHERE id = $1 AND environment_id = $2 AND status = 'committed'`,
+		  WHERE id = $1 AND environment_id = $2`,
 		fileID, envID,
 	).Scan(&path, &hash, &size, &pushedBy, &pushedAt)
 	if err != nil {
@@ -379,7 +438,6 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 			Size:          size,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
-			Status:        "committed",
 		},
 		DownloadURL:       downloadURL,
 		DownloadExpiresAt: time.Now().UTC().Add(storage.MaxSignedURLExpiry),

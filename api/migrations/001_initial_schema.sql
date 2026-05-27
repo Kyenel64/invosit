@@ -36,19 +36,31 @@ CREATE TABLE environments (
 CREATE UNIQUE INDEX environments_workspace_name_lower ON environments (workspace_id, LOWER(name));
 
 CREATE TABLE files (
-    id             TEXT PRIMARY KEY,
-    workspace_id   TEXT      NOT NULL REFERENCES workspaces(id)   ON DELETE CASCADE,
-    environment_id TEXT      NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    path           TEXT      NOT NULL,
-    content_hash   TEXT      NOT NULL,
-    size           BIGINT    NOT NULL,
-    pushed_by      TEXT               REFERENCES users(id)        ON DELETE SET NULL,
-    pushed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    status         TEXT      NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'committed'))
+    id             TEXT        PRIMARY KEY,
+    workspace_id   TEXT        NOT NULL REFERENCES workspaces(id)   ON DELETE CASCADE,
+    environment_id TEXT        NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+    path           TEXT        NOT NULL,
+    content_hash   TEXT        NOT NULL,
+    size           BIGINT      NOT NULL,
+    pushed_by      TEXT                 REFERENCES users(id)        ON DELETE SET NULL,
+    pushed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX        idx_files_workspace ON files (workspace_id);
 CREATE UNIQUE INDEX files_env_path      ON files (environment_id, path);
+
+CREATE TABLE pending_files (
+    id             TEXT        PRIMARY KEY,
+    workspace_id   TEXT        NOT NULL REFERENCES workspaces(id)   ON DELETE CASCADE,
+    environment_id TEXT        NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+    path           TEXT        NOT NULL,
+    content_hash   TEXT        NOT NULL,
+    size           BIGINT      NOT NULL,
+    pushed_by      TEXT                 REFERENCES users(id)        ON DELETE SET NULL,
+    pushed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_pending_files_pushed_at ON pending_files (pushed_at);
 
 CREATE TABLE wrapped_deks (
     file_id       TEXT  NOT NULL REFERENCES files(id) ON DELETE CASCADE,
