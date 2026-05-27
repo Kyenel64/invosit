@@ -231,9 +231,6 @@ func TestDeleteFile_Success(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT content_hash FROM files`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"content_hash"}).AddRow(validHash))
 	mock.ExpectExec(`DELETE FROM files WHERE id = \$1 AND environment_id = \$2`).
 		WithArgs("file_xyz", "env_abc").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -248,11 +245,10 @@ func TestDeleteFile_Success(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204 (body = %s)", rec.Code, rec.Body.String())
 	}
-	if stub.deleteCalls != 1 {
-		t.Errorf("storage.Delete calls = %d, want 1", stub.deleteCalls)
-	}
-	if stub.deletedKey != "ws_abc/"+validHash {
-		t.Errorf("deleted key = %q", stub.deletedKey)
+	// Blob deletion is deferred to the sweep (issue #62) — content-addressed
+	// blobs can be shared across rows, so DeleteFile must not delete inline.
+	if stub.deleteCalls != 0 {
+		t.Errorf("storage.Delete calls = %d, want 0 (blob cleanup is the sweep's job)", stub.deleteCalls)
 	}
 }
 
@@ -278,9 +274,9 @@ func TestDeleteFile_MissingReturns403(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT content_hash FROM files`).
+	mock.ExpectExec(`DELETE FROM files WHERE id = \$1 AND environment_id = \$2`).
 		WithArgs("file_missing", "env_abc").
-		WillReturnError(sql.ErrNoRows)
+		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
 	req := httptest.NewRequest(http.MethodDelete, "/x", nil).WithContext(pushCtx())
@@ -290,28 +286,6 @@ func TestDeleteFile_MissingReturns403(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestDeleteFile_BlobDeleteFailureStillReturns204(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT content_hash FROM files`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"content_hash"}).AddRow(validHash))
-	mock.ExpectExec(`DELETE FROM files`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	h := &Handler{db: db, blobs: &stubStorage{deleteErr: errors.New("boom")}}
-	req := httptest.NewRequest(http.MethodDelete, "/x", nil).WithContext(pushCtx())
-	req.SetPathValue("fileId", "file_xyz")
-	rec := httptest.NewRecorder()
-	h.DeleteFile(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("status = %d, want 204", rec.Code)
 	}
 }
 

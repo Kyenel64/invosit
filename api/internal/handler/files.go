@@ -388,37 +388,22 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 
 // --- Delete File ------------------------------------------------------------
 
-// DeleteFile removes the files row (cascades to wrapped_deks) and
-// best-effort deletes the orphaned blob.
+// DeleteFile deletes the file in the db.
+// Blob in S3 gets cleaned up separately when no other files reference the blob.
+// (Multiple files can reference the same blob if content is the same)
 func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	if httpx.UserID(r.Context()) == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
 		return
 	}
-	workspaceID := httpx.WorkspaceID(r.Context())
 	envID := httpx.EnvironmentID(r.Context())
-	role := httpx.WorkspaceRole(r.Context())
-	fileID := r.PathValue("fileId")
-	if fileID == "" {
-		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-		return
-	}
-	if role == "viewer" {
+	if httpx.WorkspaceRole(r.Context()) == "viewer" {
 		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "write permission required")
 		return
 	}
-
-	var contentHash string
-	err := h.db.QueryRowContext(r.Context(),
-		`SELECT content_hash FROM files WHERE id = $1 AND environment_id = $2`,
-		fileID, envID,
-	).Scan(&contentHash)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
-			return
-		}
-		httpx.InternalError(w, r, err)
+	fileID := r.PathValue("fileId")
+	if fileID == "" {
+		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
 		return
 	}
 
@@ -438,14 +423,6 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	if affected == 0 {
 		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
 		return
-	}
-
-	blobKey := workspaceID + "/" + contentHash
-	if err := h.blobs.Delete(r.Context(), blobKey); err != nil {
-		// Orphan blob is recoverable via a sweep; failing the request would
-		// suggest the DB row is still there, which would be misleading.
-		log.Printf("req=%s blob_delete_failed key=%q err=%v",
-			httpx.RequestID(r.Context()), blobKey, err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
