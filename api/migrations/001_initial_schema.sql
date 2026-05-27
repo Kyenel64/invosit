@@ -43,7 +43,8 @@ CREATE TABLE files (
     content_hash   TEXT      NOT NULL,
     size           BIGINT    NOT NULL,
     pushed_by      TEXT               REFERENCES users(id)        ON DELETE SET NULL,
-    pushed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    pushed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status         TEXT      NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'committed'))
 );
 
 CREATE INDEX        idx_files_workspace ON files (workspace_id);

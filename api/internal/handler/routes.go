@@ -30,12 +30,9 @@ func AddRoutes(mux *http.ServeMux, h *Handler) {
 
 	// Auth + workspace verification + environment verification.
 	envScoped := middleware.Chain(authed, middleware.WorkspaceMember(h.db), middleware.EnvironmentScoped(h.db))
-	mux.Handle("POST   /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files",
-		envScoped(http.HandlerFunc(h.PushFile)))
-	mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files",
-		envScoped(http.HandlerFunc(h.ListFiles)))
-	mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}",
-		envScoped(http.HandlerFunc(h.GetFile)))
-	mux.Handle("DELETE /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}",
-		envScoped(http.HandlerFunc(h.DeleteFile)))
+	mux.Handle("POST   /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files", envScoped(http.HandlerFunc(h.CreateFiles)))
+	mux.Handle("POST   /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files:complete", envScoped(http.HandlerFunc(h.CompleteFiles)))
+	mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files", envScoped(http.HandlerFunc(h.ListFiles)))
+	mux.Handle("GET    /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}", envScoped(http.HandlerFunc(h.GetFile)))
+	mux.Handle("DELETE /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}", envScoped(http.HandlerFunc(h.DeleteFile)))
 }

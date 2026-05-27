@@ -17,27 +17,21 @@ servers:
 
 tags:
   - name: Auth
-    description: |
-      Profile lookup. Registration, login, logout, password recovery, and
-      email verification are served by Ory Kratos directly (public API at
-      `:4433`, self-service UI at `:4455`) — they are not part of this API.
+    description: Profile lookup
   - name: Workspaces
     description: Create and manage workspaces
   - name: Members
     description: Invite and manage workspace members
   - name: Files
-    description: Push and pull encrypted files
+    description: Push and pull invosit files
   - name: Access
     description: Per-user per-file access control
   - name: Audit
     description: Audit log for all workspace activity
 
-# ─────────────────────────────────────────────
-# PATHS
-# ─────────────────────────────────────────────
 paths:
 
-  # ── AUTH ──────────────────────────────────
+  # -── AUTH ──────────────────────────────────
 
   /auth/me:
     get:
@@ -45,8 +39,8 @@ paths:
       summary: Get current authenticated user
       description: |
         Resolves the current Kratos session to a local user record. The
-        session is identified either by an `Authorization: Bearer <token>`
-        header (CLI) or by the `ory_kratos_session` cookie (browser).
+        session is identified either by an Authorization: Bearer <token>
+        header (CLI) or by the ory_kratos_session cookie (browser).
       security:
         - bearerAuth: []
         - cookieAuth: []
@@ -301,16 +295,15 @@ paths:
                 $ref: "#/components/schemas/Error"
 
   # ── FILES ─────────────────────────────────
-  #
-  # File operations are scoped per environment. The schema enforces
-  # uniqueness on (environment_id, path) and access_grants carry
-  # environment_id, so the environment is the natural parent in the URL.
 
   /workspaces/{workspaceId}/environments/{environmentId}/files:
     get:
       tags: [Files]
-      summary: List files in environment
-      description: Returns file metadata the current user has access to. Does not return file content.
+      summary: List committed files in environment
+      description: |
+        Returns committed file metadata, each with a short-lived signed
+        download URL (15 min expiry). Pending files (mid-upload) are
+        invisible to readers.
       security:
         - bearerAuth: []
       parameters:
@@ -318,7 +311,7 @@ paths:
         - $ref: "#/components/parameters/environmentId"
       responses:
         "200":
-          description: List of tracked files
+          description: List of committed files
           content:
             application/json:
               schema:
@@ -327,7 +320,7 @@ paths:
                   files:
                     type: array
                     items:
-                      $ref: "#/components/schemas/FileMeta"
+                      $ref: "#/components/schemas/ListedFileMeta"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -335,13 +328,20 @@ paths:
 
     post:
       tags: [Files]
-      summary: Push a file (register metadata + get signed upload URL)
+      summary: Phase 1 — register pending files + receive signed upload URLs
       description: |
-        Upserts the (environment_id, path) row and returns a short-lived signed
-        PUT URL the CLI uses to upload the blob directly to storage. Pushing to
-        an existing path overwrites in place and best-effort deletes the prior
-        blob. The DB upsert happens before the URL is issued — a failed upload
-        leaves a row pointing at a missing blob, not the reverse.
+        Phase 1 of the two-phase upload. For each entry, inserts a row in
+        the `files` table with `status='pending'` and returns a short-lived
+        signed PUT URL. The CLI uploads bytes directly to storage. Pending
+        rows are invisible to reads until the CLI calls POST .../files:complete
+        to promote them to `status='committed'`.
+
+        Orphan blob cleanup (failed/abandoned uploads) is handled by a
+        separate sweep job, not inline here.
+
+        Per-entry validation or DB failures are reported in the results
+        array; only auth, role, and batch-cap violations 4xx the outer
+        request.
       security:
         - bearerAuth: []
       parameters:
@@ -352,16 +352,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FilePushRequest"
+              $ref: "#/components/schemas/CreateFilesRequest"
       responses:
-        "201":
-          description: File pushed successfully
+        "200":
+          description: Batch results (per-entry success or error)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/FilePushResponse"
+                $ref: "#/components/schemas/CreateFilesResponse"
         "400":
-          description: Invalid path, hash, or size
+          description: "Invalid request or batch exceeds 100 entries (`code: BATCH_TOO_LARGE`)"
           content:
             application/json:
               schema:
@@ -370,20 +370,55 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
-        "413":
-          description: File too large
+
+  /workspaces/{workspaceId}/environments/{environmentId}/files:complete:
+    post:
+      tags: [Files]
+      summary: Phase 2 — confirm S3 upload, promote rows to committed
+      description: |
+        Phase 2 of the two-phase upload. For each `file_id`, transitions
+        the row from `pending` to `committed` so it becomes visible to
+        reads. Idempotent — completing an already-committed file is a
+        no-op success. Unknown ids (or ids from a different environment)
+        return per-entry `FORBIDDEN`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/workspaceId"
+        - $ref: "#/components/parameters/environmentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteFilesRequest"
+      responses:
+        "200":
+          description: Batch results (per-entry success or error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompleteFilesResponse"
+        "400":
+          description: "Invalid request or batch exceeds 100 entries (`code: BATCH_TOO_LARGE`)"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /workspaces/{workspaceId}/environments/{environmentId}/files/{fileId}:
     get:
       tags: [Files]
-      summary: Get a signed download URL for a file
+      summary: Get committed file metadata + signed download URL
       description: |
-        Returns a short-lived signed URL (15 min expiry) plus the file's
-        metadata so the CLI can download it.
+        Returns metadata for a single committed file along with a
+        short-lived signed download URL. Pending files return 403 — same
+        as nonexistent — so callers can't tell whether an in-progress
+        upload exists.
       security:
         - bearerAuth: []
       parameters:
@@ -392,11 +427,11 @@ paths:
         - $ref: "#/components/parameters/fileId"
       responses:
         "200":
-          description: Signed URL and metadata
+          description: File metadata + signed download URL
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/FileDownloadResponse"
+                $ref: "#/components/schemas/ListedFileMeta"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -708,6 +743,10 @@ components:
 
     FileMeta:
       type: object
+      description: |
+        Base file metadata. `status` is `pending` for rows created by
+        POST /files but not yet confirmed; `committed` once the CLI has
+        called POST /files:complete.
       properties:
         id:
           type: string
@@ -733,6 +772,28 @@ components:
         pushed_at:
           type: string
           format: date-time
+        status:
+          type: string
+          enum: [pending, committed]
+          example: committed
+
+    ListedFileMeta:
+      description: |
+        FileMeta plus a short-lived signed GET URL. Returned by GET /files
+        (list items) and GET /files/{id} (single). `status` is always
+        `committed` because pending rows are filtered from reads.
+      allOf:
+        - $ref: "#/components/schemas/FileMeta"
+        - type: object
+          required: [download_url, download_expires_at]
+          properties:
+            download_url:
+              type: string
+              description: Short-lived signed GET URL (15 min expiry)
+              example: https://r2.invosit.dev/blobs/a1b2c3?X-Amz-Expires=900&...
+            download_expires_at:
+              type: string
+              format: date-time
 
     FilePushRequest:
       type: object
@@ -751,73 +812,139 @@ components:
           description: File size in bytes
           example: 4096
 
-    FilePushResponse:
+    CreateFilesRequest:
       type: object
-      description: |
-        Returned on successful push. The CLI uploads the blob via a PUT to
-        `upload_url` before the URL expires.
+      required: [files]
       properties:
-        id:
-          type: string
-          example: file_xyz789
-        environment_id:
-          type: string
-          example: env_def456
+        files:
+          type: array
+          description: 1..100 file entries to register as pending and presign uploads for.
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/FilePushRequest"
+
+    CreateFilesResultOk:
+      type: object
+      required: [path, status, file, upload_url, upload_expires_at]
+      properties:
         path:
           type: string
           example: config/example.txt
-        content_hash:
+        status:
           type: string
-          example: a1b2c3d4e5f6...
-        size:
-          type: integer
-          example: 4096
-        pushed_by:
-          type: string
-          example: usr_def456
-        pushed_at:
-          type: string
-          format: date-time
+          enum: [ok]
+        file:
+          $ref: "#/components/schemas/FileMeta"
+          description: The newly inserted row. `status` is `pending` until POST /files:complete.
         upload_url:
           type: string
-          description: Short-lived signed PUT URL (15 min). Upload the blob here.
+          description: Short-lived signed PUT URL (15 min). Upload the blob here, then call POST /files:complete.
           example: https://r2.invosit.dev/blobs/...?X-Amz-Expires=900&...
         upload_expires_at:
           type: string
           format: date-time
 
-    FileDownloadResponse:
+    CreateFilesResultError:
       type: object
+      required: [path, status, code, message]
+      properties:
+        path:
+          type: string
+          example: config/example.txt
+        status:
+          type: string
+          enum: [error]
+        code:
+          type: string
+          description: Stable machine-readable error code (e.g. INVALID_REQUEST, INTERNAL_ERROR)
+          example: INVALID_REQUEST
+        message:
+          type: string
+          example: invalid path
+
+    CreateFilesResult:
+      oneOf:
+        - $ref: "#/components/schemas/CreateFilesResultOk"
+        - $ref: "#/components/schemas/CreateFilesResultError"
+      discriminator:
+        propertyName: status
+        mapping:
+          ok: "#/components/schemas/CreateFilesResultOk"
+          error: "#/components/schemas/CreateFilesResultError"
+
+    CreateFilesResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CreateFilesResult"
+
+    CompleteFilesRequest:
+      type: object
+      required: [file_ids]
+      properties:
+        file_ids:
+          type: array
+          description: 1..100 file ids to transition from pending to committed.
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+            example: file_xyz789
+
+    CompleteFilesResultOk:
+      type: object
+      required: [id, status, file]
       properties:
         id:
           type: string
           example: file_xyz789
-        environment_id:
+        status:
           type: string
-          example: env_def456
-        path:
+          enum: [ok]
+        file:
+          $ref: "#/components/schemas/FileMeta"
+          description: The updated row, now with `status='committed'`.
+
+    CompleteFilesResultError:
+      type: object
+      required: [id, status, code, message]
+      properties:
+        id:
           type: string
-          example: config/example.txt
-        content_hash:
+          example: file_xyz789
+        status:
           type: string
-          description: Expected SHA-256 hash to verify after download
-          example: a1b2c3d4e5f6...
-        size:
-          type: integer
-          example: 4096
-        pushed_by:
+          enum: [error]
+        code:
           type: string
-          example: usr_def456
-        pushed_at:
+          description: Stable machine-readable error code (e.g. FORBIDDEN, INTERNAL_ERROR)
+          example: FORBIDDEN
+        message:
           type: string
-          format: date-time
-        download_url:
-          type: string
-          description: Short-lived signed GET URL (15 min expiry)
-          example: https://r2.invosit.dev/blobs/a1b2c3?X-Amz-Expires=900&...
-        download_expires_at:
-          type: string
-          format: date-time
+          example: access denied
+
+    CompleteFilesResult:
+      oneOf:
+        - $ref: "#/components/schemas/CompleteFilesResultOk"
+        - $ref: "#/components/schemas/CompleteFilesResultError"
+      discriminator:
+        propertyName: status
+        mapping:
+          ok: "#/components/schemas/CompleteFilesResultOk"
+          error: "#/components/schemas/CompleteFilesResultError"
+
+    CompleteFilesResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompleteFilesResult"
 
     AccessGrant:
       type: object
