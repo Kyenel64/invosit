@@ -23,6 +23,9 @@ func (c *Client) Logout(ctx context.Context, sessionToken string) error {
 	resp, err := c.sdk.FrontendAPI.PerformNativeLogout(ctx).
 		PerformNativeLogoutBody(ory.PerformNativeLogoutBody{SessionToken: sessionToken}).
 		Execute()
+	if resp != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 	if err != nil {
 		// 403 means the token is already invalid/expired/unknown — nothing left to revoke.
 		if resp != nil && resp.StatusCode == http.StatusForbidden {
