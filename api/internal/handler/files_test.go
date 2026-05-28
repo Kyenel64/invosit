@@ -14,6 +14,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/kyenel64/invosit/api/internal/httpx"
+	"github.com/kyenel64/invosit/api/internal/storage"
 )
 
 // stubStorage records calls and returns canned values so handler tests can
@@ -56,6 +57,9 @@ func (s *stubStorage) Delete(_ context.Context, key string) error {
 	s.deleteCalls++
 	s.deletedKey = key
 	return s.deleteErr
+}
+func (s *stubStorage) List(_ context.Context, _ string, _ func(storage.Object) error) error {
+	return nil
 }
 
 const validHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
