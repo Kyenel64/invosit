@@ -1,12 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,8 +81,8 @@ func init() {
 }
 
 type preparedFile struct {
-	absPath        string
 	projectRelPath string
+	content        []byte
 	hash           string
 	size           int64
 }
@@ -110,28 +110,18 @@ func prepareFile(projectRoot, arg string) (preparedFile, error) {
 	if err != nil {
 		return preparedFile{}, err
 	}
-	absPath, err := filepath.Abs(arg)
+
+	content, err := os.ReadFile(arg) //nolint:gosec
 	if err != nil {
-		return preparedFile{}, fmt.Errorf("failed to resolve path: %w", err)
+		return preparedFile{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	file, err := os.Open(absPath) //nolint:gosec
-	if err != nil {
-		return preparedFile{}, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	hasher := sha256.New()
-	size, err := io.Copy(hasher, file)
-	if err != nil {
-		return preparedFile{}, fmt.Errorf("failed to hash file: %w", err)
-	}
-
+	sum := sha256.Sum256(content)
 	return preparedFile{
-		absPath:        absPath,
 		projectRelPath: projectRelPath,
-		hash:           hex.EncodeToString(hasher.Sum(nil)),
-		size:           size,
+		content:        content,
+		hash:           hex.EncodeToString(sum[:]),
+		size:           int64(len(content)),
 	}, nil
 }
 
@@ -219,13 +209,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 }
 
 func uploadOne(ctx context.Context, file preparedFile, signedURL string) error {
-	handle, err := os.Open(file.absPath) //nolint:gosec
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer func() { _ = handle.Close() }()
-
-	if err := blob.Upload(ctx, signedURL, handle, file.size); err != nil {
+	if err := blob.Upload(ctx, signedURL, bytes.NewReader(file.content), file.size); err != nil {
 		return fmt.Errorf("failed to upload blob: %w", err)
 	}
 	return nil
