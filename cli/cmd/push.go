@@ -1,12 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +15,8 @@ import (
 	"github.com/kyenel64/invosit/cli/internal/blob"
 	"github.com/spf13/cobra"
 )
+
+const pushBatchLimit = 100
 
 var pushEnvFlag string
 
@@ -55,17 +57,15 @@ Uses the nearest .invosit.json file as project root.
 			return err
 		}
 
-		failed := 0
-		// TODO: batch push files
-		for _, arg := range args {
-			projectRelPath, err := projectRelative(projectRoot, arg)
-			if err == nil {
-				err = pushOne(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envID, projectRelPath, arg)
-			}
+		prepared, failed := prepareFiles(cmd, projectRoot, args)
+
+		for chunkStart := 0; chunkStart < len(prepared); chunkStart += pushBatchLimit {
+			chunkEnd := min(chunkStart+pushBatchLimit, len(prepared))
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envID, prepared[chunkStart:chunkEnd])
 			if err != nil {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "failed to push %s: %v\n", arg, err)
-				failed++
+				return err
 			}
+			failed += batchFailed
 		}
 
 		if failed > 0 {
@@ -78,6 +78,154 @@ Uses the nearest .invosit.json file as project root.
 func init() {
 	pushCmd.Flags().StringVar(&pushEnvFlag, "env", "", "environment name (overrides defaultEnvironment in .invosit.json)")
 	rootCmd.AddCommand(pushCmd)
+}
+
+type preparedFile struct {
+	projectRelPath string
+	content        []byte
+	hash           string
+	size           int64
+}
+
+// prepareFiles resolves and hashes each arg. Failures are reported to stderr
+// and dropped from the returned slice so the rest of the batch can proceed.
+func prepareFiles(cmd *cobra.Command, projectRoot string, args []string) ([]preparedFile, int) {
+	stderr := cmd.ErrOrStderr()
+	prepared := make([]preparedFile, 0, len(args))
+	failed := 0
+	for _, arg := range args {
+		entry, err := prepareFile(projectRoot, arg)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: %v\n", arg, err)
+			failed++
+			continue
+		}
+		prepared = append(prepared, entry)
+	}
+	return prepared, failed
+}
+
+func prepareFile(projectRoot, arg string) (preparedFile, error) {
+	projectRelPath, err := projectRelative(projectRoot, arg)
+	if err != nil {
+		return preparedFile{}, err
+	}
+
+	content, err := os.ReadFile(arg) //nolint:gosec
+	if err != nil {
+		return preparedFile{}, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	sum := sha256.Sum256(content)
+	return preparedFile{
+		projectRelPath: projectRelPath,
+		content:        content,
+		hash:           hex.EncodeToString(sum[:]),
+		size:           int64(len(content)),
+	}, nil
+}
+
+// pushBatch runs the 2-step file creation process.
+// create pending file metadata -> retrieve and post to s3 with signed url -> call :complete
+func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, envID string, batch []preparedFile) (int, error) {
+	ctx := cmd.Context()
+	stdout := cmd.OutOrStdout()
+	stderr := cmd.ErrOrStderr()
+
+	entries := make([]apiclient.CreateFileEntry, len(batch))
+	for index, file := range batch {
+		entries[index] = apiclient.CreateFileEntry{
+			Path:        file.projectRelPath,
+			ContentHash: file.hash,
+			Size:        file.size,
+		}
+	}
+
+	created, err := client.CreateFiles(ctx, token, workspaceID, envID, entries)
+	if err != nil {
+		if errors.Is(err, apiclient.ErrUnauthorized) {
+			return 0, errors.New("not logged in or session expired. run `invosit login` to authenticate")
+		}
+		return 0, fmt.Errorf("failed to register files with api: %w", err)
+	}
+
+	resultByPath := make(map[string]apiclient.CreateFilesResult, len(created))
+	for _, result := range created {
+		resultByPath[result.Path] = result
+	}
+
+	uploadedIDs := make([]string, 0, len(batch))
+	uploadedByID := make(map[string]preparedFile, len(batch))
+	failed := 0
+
+	for _, file := range batch {
+		result, ok := resultByPath[file.projectRelPath]
+		if !ok {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: no result returned from api\n", file.projectRelPath)
+			failed++
+			continue
+		}
+		if result.Status != "ok" || result.File == nil {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: %s\n", file.projectRelPath, formatResultError(result.Code, result.Message))
+			failed++
+			continue
+		}
+
+		if err := uploadOne(ctx, file, result.UploadURL); err != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: %v\n", file.projectRelPath, err)
+			failed++
+			continue
+		}
+		uploadedIDs = append(uploadedIDs, result.File.ID)
+		uploadedByID[result.File.ID] = file
+	}
+
+	if len(uploadedIDs) == 0 {
+		return failed, nil
+	}
+
+	completed, err := client.CompleteFiles(ctx, token, workspaceID, envID, uploadedIDs)
+	if err != nil {
+		if errors.Is(err, apiclient.ErrUnauthorized) {
+			return 0, errors.New("not logged in or session expired. run `invosit login` to authenticate")
+		}
+		return 0, fmt.Errorf("failed to complete files with api: %w", err)
+	}
+
+	for _, result := range completed {
+		file, ok := uploadedByID[result.ID]
+		if !ok {
+			continue
+		}
+		if result.Status != "ok" {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: %s\n", file.projectRelPath, formatResultError(result.Code, result.Message))
+			failed++
+			continue
+		}
+		_, _ = fmt.Fprintf(stdout, "pushed %s (%d bytes)\n", file.projectRelPath, file.size)
+	}
+
+	return failed, nil
+}
+
+func uploadOne(ctx context.Context, file preparedFile, signedURL string) error {
+	if err := blob.Upload(ctx, signedURL, bytes.NewReader(file.content), file.size); err != nil {
+		return fmt.Errorf("failed to upload blob: %w", err)
+	}
+	return nil
+}
+
+func formatResultError(code, message string) string {
+	switch {
+	case code != "" && message != "":
+		return fmt.Sprintf("%s: %s", code, message)
+	case message != "":
+		return message
+	case code != "":
+		return code
+	default:
+		return "unknown error"
+	}
 }
 
 func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspaceID, name string) (string, error) {
@@ -94,44 +242,6 @@ func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspac
 		}
 	}
 	return "", fmt.Errorf("environment %q not found in workspace", name)
-}
-
-func pushOne(ctx context.Context, client *apiclient.Client, token, workspaceID, envID, projectRelPath, relPath string) error {
-	file, err := os.Open(relPath) //nolint:gosec
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	hasher := sha256.New()
-	size, err := io.Copy(hasher, file)
-	if err != nil {
-		return fmt.Errorf("failed to hash file: %w", err)
-	}
-	hash := hex.EncodeToString(hasher.Sum(nil))
-
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to rewind file: %w", err)
-	}
-
-	res, err := client.PushFile(ctx, token, workspaceID, envID, apiclient.PushFileRequest{
-		Path:        projectRelPath,
-		ContentHash: hash,
-		Size:        size,
-	})
-	if err != nil {
-		if errors.Is(err, apiclient.ErrUnauthorized) {
-			return errors.New("not logged in or session expired. run `invosit login` to authenticate")
-		}
-		return fmt.Errorf("failed to register file with api: %w", err)
-	}
-
-	if err := blob.Upload(ctx, res.UploadURL, file, size); err != nil {
-		return fmt.Errorf("failed to upload blob: %w", err)
-	}
-
-	fmt.Printf("pushed %s (%d bytes)\n", projectRelPath, size)
-	return nil
 }
 
 // projectRelative constructs an invosit-valid path relative to project root
