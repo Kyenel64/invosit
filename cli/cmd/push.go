@@ -43,25 +43,25 @@ Uses the nearest .invosit.json file as project root.
 			return err
 		}
 
-		envName := pushEnvFlag
-		if envName == "" {
-			envName = cfg.DefaultEnvironment
-		}
-		if envName == "" {
-			return errors.New("no environment set. pass --env <name> or set defaultEnvironment in .invosit.json")
-		}
-
 		apiClient := apiclient.NewClient(creds.APIURL)
-		envID, err := resolveEnvID(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envName)
-		if err != nil {
-			return err
+		var envID string
+		switch {
+		case pushEnvFlag != "":
+			envID, err = resolveEnvID(cmd.Context(), apiClient, creds.SessionToken, cfg.Project.Workspace.ID, pushEnvFlag)
+			if err != nil {
+				return err
+			}
+		case cfg.Project.DefaultEnvironment != nil:
+			envID = cfg.Project.DefaultEnvironment.ID
+		default:
+			return errors.New("no environment set. pass --env <name> or set a default environment via `invosit init`")
 		}
 
 		prepared, failed := prepareFiles(cmd, projectRoot, args)
 
 		for chunkStart := 0; chunkStart < len(prepared); chunkStart += pushBatchLimit {
 			chunkEnd := min(chunkStart+pushBatchLimit, len(prepared))
-			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envID, prepared[chunkStart:chunkEnd])
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.Project.Workspace.ID, envID, prepared[chunkStart:chunkEnd])
 			if err != nil {
 				return err
 			}

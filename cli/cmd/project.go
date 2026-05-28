@@ -19,6 +19,9 @@ func loadProjectConfig() (*config.Config, string, error) {
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
+		if errors.Is(err, config.ErrUnsupportedVersion) {
+			return nil, "", errors.New(".invosit.json is from an older invosit version. run `invosit init` to recreate it")
+		}
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
 	return cfg, filepath.Dir(configPath), nil

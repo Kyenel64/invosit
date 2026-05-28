@@ -38,17 +38,19 @@ var initCmd = &cobra.Command{
 		}
 
 		if err := config.Save(config.FileName, &config.Config{
-			Version:            config.Version,
-			WorkspaceID:        workspace.ID,
-			DefaultEnvironment: defaultEnv,
+			Version: config.Version,
+			Project: config.Project{
+				Workspace:          config.Workspace{ID: workspace.ID, Name: workspace.Name},
+				DefaultEnvironment: defaultEnv,
+			},
 		}); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
 
-		if defaultEnv == "" {
+		if defaultEnv == nil {
 			fmt.Printf("Initialized %s (workspace: %s, no default environment — pass --env to push/pull)\n", config.FileName, workspace.Name)
 		} else {
-			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", config.FileName, workspace.Name, defaultEnv)
+			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", config.FileName, workspace.Name, defaultEnv.Name)
 		}
 		return nil
 	},
@@ -106,16 +108,16 @@ func chooseWorkspace(ctx context.Context, client *apiclient.Client, token string
 	return &workspaces[selectedIdx], nil
 }
 
-func chooseDefaultEnvironment(ctx context.Context, client *apiclient.Client, token string, workspaceID string) (string, error) {
+func chooseDefaultEnvironment(ctx context.Context, client *apiclient.Client, token string, workspaceID string) (*config.Environment, error) {
 	environments, err := client.GetEnvironments(ctx, token, workspaceID)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
-			return "", errors.New("not logged in or session expired. run `invosit login` to authenticate")
+			return nil, errors.New("not logged in or session expired. run `invosit login` to authenticate")
 		}
-		return "", err
+		return nil, err
 	}
 	if len(environments) == 0 {
-		return "", fmt.Errorf("you don't have access to any environments in workspace: %s", workspaceID)
+		return nil, fmt.Errorf("you don't have access to any environments in workspace: %s", workspaceID)
 	}
 
 	const skipLabel = "Skip (no default)"
@@ -126,10 +128,11 @@ func chooseDefaultEnvironment(ctx context.Context, client *apiclient.Client, tok
 	}
 	selectedIdx, err := tui.Select("Select a default environment (optional):", labels)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if selectedIdx == 0 {
-		return "", nil
+		return nil, nil //nolint:nilnil
 	}
-	return environments[selectedIdx-1].Name, nil
+	selected := environments[selectedIdx-1]
+	return &config.Environment{ID: selected.ID, Name: selected.Name}, nil
 }

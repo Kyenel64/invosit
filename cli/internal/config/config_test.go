@@ -13,9 +13,11 @@ import (
 
 func validConfig() *config.Config {
 	return &config.Config{
-		Version:            config.Version,
-		WorkspaceID:        "ws_abc123",
-		DefaultEnvironment: "dev",
+		Version: config.Version,
+		Project: config.Project{
+			Workspace:          config.Workspace{ID: "ws_abc123", Name: "workspace1"},
+			DefaultEnvironment: &config.Environment{ID: "env_abc123", Name: "dev"},
+		},
 	}
 }
 
@@ -43,13 +45,28 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name:    "empty workspace id",
-			mutate:  func(c *config.Config) { c.WorkspaceID = "" },
-			wantSub: "workspaceId",
+			mutate:  func(c *config.Config) { c.Project.Workspace.ID = "" },
+			wantSub: "workspace id",
 		},
 		{
 			name:    "workspace id wrong prefix",
-			mutate:  func(c *config.Config) { c.WorkspaceID = "usr_abc123" },
-			wantSub: "workspaceId",
+			mutate:  func(c *config.Config) { c.Project.Workspace.ID = "usr_abc123" },
+			wantSub: "workspace id",
+		},
+		{
+			name:    "empty workspace name",
+			mutate:  func(c *config.Config) { c.Project.Workspace.Name = "" },
+			wantSub: "workspace name",
+		},
+		{
+			name:    "environment id wrong prefix",
+			mutate:  func(c *config.Config) { c.Project.DefaultEnvironment.ID = "ws_abc123" },
+			wantSub: "environment id",
+		},
+		{
+			name:    "empty environment name",
+			mutate:  func(c *config.Config) { c.Project.DefaultEnvironment.Name = "" },
+			wantSub: "environment name",
 		},
 	}
 
@@ -94,7 +111,7 @@ func TestSaveRejectsNil(t *testing.T) {
 
 func TestSaveRejectsInvalid(t *testing.T) {
 	cfg := validConfig()
-	cfg.WorkspaceID = "bad_prefix"
+	cfg.Project.Workspace.ID = "bad_prefix"
 	err := config.Save(tmpPath(t), cfg)
 	if err == nil {
 		t.Fatal("want error, got nil")
@@ -115,7 +132,7 @@ func TestSaveLeavesNoTmpFile(t *testing.T) {
 func TestSaveOmitsEmptyDefaultEnvironment(t *testing.T) {
 	path := tmpPath(t)
 	cfg := validConfig()
-	cfg.DefaultEnvironment = ""
+	cfg.Project.DefaultEnvironment = nil
 
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -132,7 +149,7 @@ func TestSaveOmitsEmptyDefaultEnvironment(t *testing.T) {
 
 func TestLoadAcceptsMissingDefaultEnvironment(t *testing.T) {
 	path := tmpPath(t)
-	body := `{"version":1,"workspaceId":"ws_abc"}`
+	body := `{"version":2,"project":{"workspace":{"id":"ws_abc","name":"workspace1"}}}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -141,8 +158,8 @@ func TestLoadAcceptsMissingDefaultEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if loaded.DefaultEnvironment != "" {
-		t.Errorf("DefaultEnvironment = %q, want empty", loaded.DefaultEnvironment)
+	if loaded.Project.DefaultEnvironment != nil {
+		t.Errorf("DefaultEnvironment = %+v, want nil", loaded.Project.DefaultEnvironment)
 	}
 }
 
@@ -155,13 +172,26 @@ func TestLoadMissing(t *testing.T) {
 
 func TestLoadRejectsUnknownField(t *testing.T) {
 	path := tmpPath(t)
-	body := `{"version":1,"workspaceId":"ws_abc","defaultEnvironment":"dev","bogus":"hi"}`
+	body := `{"version":2,"project":{"workspace":{"id":"ws_abc","name":"workspace1"}},"bogus":"hi"}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	if _, err := config.Load(path); err == nil {
 		t.Fatal("want error for unknown field, got nil")
+	}
+}
+
+func TestLoadRejectsOldVersion(t *testing.T) {
+	path := tmpPath(t)
+	body := `{"version":1,"workspaceId":"ws_abc","defaultEnvironment":"dev"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := config.Load(path)
+	if !errors.Is(err, config.ErrUnsupportedVersion) {
+		t.Errorf("want ErrUnsupportedVersion, got %v", err)
 	}
 }
 
@@ -179,7 +209,7 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 func TestFindInCwd(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.FileName)
-	if err := os.WriteFile(path, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":2,"project":{"workspace":{"id":"ws_x","name":"wx"}}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -199,7 +229,7 @@ func TestFindWalksUp(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	cfgPath := filepath.Join(root, config.FileName)
-	if err := os.WriteFile(cfgPath, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"version":2,"project":{"workspace":{"id":"ws_x","name":"wx"}}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -221,10 +251,10 @@ func TestFindReturnsClosest(t *testing.T) {
 	}
 	rootCfg := filepath.Join(root, config.FileName)
 	midCfg := filepath.Join(mid, config.FileName)
-	if err := os.WriteFile(rootCfg, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+	if err := os.WriteFile(rootCfg, []byte(`{"version":2,"project":{"workspace":{"id":"ws_x","name":"wx"}}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile root: %v", err)
 	}
-	if err := os.WriteFile(midCfg, []byte(`{"version":1,"workspaceId":"ws_y"}`), 0o644); err != nil {
+	if err := os.WriteFile(midCfg, []byte(`{"version":2,"project":{"workspace":{"id":"ws_y","name":"wy"}}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile mid: %v", err)
 	}
 
@@ -247,7 +277,7 @@ func TestFindSkipsDirectoryWithMatchingName(t *testing.T) {
 		t.Fatalf("Mkdir directory-named-like-config: %v", err)
 	}
 	rootCfg := filepath.Join(root, config.FileName)
-	if err := os.WriteFile(rootCfg, []byte(`{"version":1,"workspaceId":"ws_x"}`), 0o644); err != nil {
+	if err := os.WriteFile(rootCfg, []byte(`{"version":2,"project":{"workspace":{"id":"ws_x","name":"wx"}}}`), 0o644); err != nil {
 		t.Fatalf("WriteFile root: %v", err)
 	}
 
@@ -277,7 +307,7 @@ func TestFindReturnsErrNotFound(t *testing.T) {
 
 func TestLoadValidates(t *testing.T) {
 	path := tmpPath(t)
-	body := `{"version":999,"workspaceId":"ws_abc","defaultEnvironment":"dev"}`
+	body := `{"version":2,"project":{"workspace":{"id":"usr_abc","name":"workspace1"}}}`
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -286,7 +316,7 @@ func TestLoadValidates(t *testing.T) {
 	if err == nil {
 		t.Fatal("want validation error, got nil")
 	}
-	if !strings.Contains(err.Error(), "version") {
-		t.Errorf("error %q should mention version", err.Error())
+	if !strings.Contains(err.Error(), "workspace id") {
+		t.Errorf("error %q should mention workspace id", err.Error())
 	}
 }

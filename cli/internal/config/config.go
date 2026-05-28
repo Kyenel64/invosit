@@ -1,28 +1,48 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 const (
-	Version  = 1
+	Version  = 2
 	FileName = ".invosit.json"
 
-	workspaceIDPrefix = "ws_"
+	workspaceIDPrefix   = "ws_"
+	environmentIDPrefix = "env_"
 )
 
-type Config struct {
-	Version            int    `json:"version"`
-	WorkspaceID        string `json:"workspaceId"`
-	DefaultEnvironment string `json:"defaultEnvironment,omitempty"`
+type Workspace struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-var ErrNotFound = errors.New("invosit config not found")
+type Environment struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type Project struct {
+	Workspace          Workspace    `json:"workspace"`
+	DefaultEnvironment *Environment `json:"defaultEnvironment,omitempty"`
+}
+
+type Config struct {
+	Version int     `json:"version"`
+	Project Project `json:"project"`
+}
+
+var (
+	ErrNotFound           = errors.New("invosit config not found")
+	ErrUnsupportedVersion = errors.New("invosit config version is unsupported")
+)
 
 // Find walks up parent directories to return the absolute path
 // of the nearest .invosit.json config file.
@@ -58,7 +78,22 @@ func Load(path string) (*Config, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	decoder := json.NewDecoder(f)
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	var peek struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &peek); err != nil {
+		return nil, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if peek.Version != Version {
+		return nil, fmt.Errorf("%w: %s is version %d, want %d", ErrUnsupportedVersion, path, peek.Version, Version)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 
 	var loaded Config
@@ -101,8 +136,19 @@ func (c *Config) Validate() error {
 	if c.Version != Version {
 		return fmt.Errorf("version must be %d, got %d", Version, c.Version)
 	}
-	if !strings.HasPrefix(c.WorkspaceID, workspaceIDPrefix) {
-		return fmt.Errorf("workspaceId must start with %q", workspaceIDPrefix)
+	if !strings.HasPrefix(c.Project.Workspace.ID, workspaceIDPrefix) {
+		return fmt.Errorf("workspace id must start with %q", workspaceIDPrefix)
+	}
+	if c.Project.Workspace.Name == "" {
+		return errors.New("workspace name must not be empty")
+	}
+	if env := c.Project.DefaultEnvironment; env != nil {
+		if !strings.HasPrefix(env.ID, environmentIDPrefix) {
+			return fmt.Errorf("environment id must start with %q", environmentIDPrefix)
+		}
+		if env.Name == "" {
+			return errors.New("environment name must not be empty")
+		}
 	}
 	return nil
 }
