@@ -91,6 +91,10 @@ func chooseWorkspace(ctx context.Context, client *apiclient.Client, token string
 		}
 		return nil, err
 	}
+	return pickWorkspace(workspaces)
+}
+
+func pickWorkspace(workspaces []apiclient.Workspace) (*apiclient.Workspace, error) {
 	if len(workspaces) == 0 {
 		return nil, errors.New("you don't have access to any workspaces")
 	}
