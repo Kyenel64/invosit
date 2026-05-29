@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/spf13/cobra"
 )
@@ -68,15 +70,31 @@ var workspaceListCmd = &cobra.Command{
 			return nil
 		}
 
-		widest := 0
+		rows := make([][]string, 0, len(workspaces))
 		for _, workspace := range workspaces {
-			if len(workspace.ID) > widest {
-				widest = len(workspace.ID)
-			}
+			rows = append(rows, []string{
+				workspace.ID,
+				workspace.Name,
+				workspace.Role,
+				workspace.CreatedAt.Local().Format("2006-01-02 15:04"),
+			})
 		}
-		for _, workspace := range workspaces {
-			_, _ = fmt.Fprintf(out, "%-*s  %s\n", widest, workspace.ID, workspace.Name)
-		}
+
+		headerStyle := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+		cellStyle := lipgloss.NewStyle().Padding(0, 1)
+		workspaceTable := table.New().
+			Border(lipgloss.NormalBorder()).
+			BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("240"))).
+			Headers("ID", "NAME", "ROLE", "CREATED").
+			Rows(rows...).
+			StyleFunc(func(row, _ int) lipgloss.Style {
+				if row == table.HeaderRow {
+					return headerStyle
+				}
+				return cellStyle
+			})
+
+		_, _ = fmt.Fprintln(out, workspaceTable)
 		return nil
 	},
 }
