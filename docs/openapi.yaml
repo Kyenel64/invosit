@@ -642,6 +642,9 @@ components:
       name: environmentId
       in: path
       required: true
+      description: >-
+        Either an environment id (env_ prefix) or the environment name.
+        Name lookups are case-insensitive and scoped to the workspace.
       schema:
         type: string
       example: env_def456

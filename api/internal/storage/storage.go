@@ -1,7 +1,3 @@
-// Package storage is the blob-storage boundary for the API.
-// Do not expose provider sdk outside of this package.
-// Blobs handed to these functions are already encrypted by the CLI.
-// No plaintext should be read, logged, or buffered
 package storage
 
 import (
@@ -16,19 +12,19 @@ const MaxSignedURLExpiry = 15 * time.Minute
 var ErrExpiryTooLong = errors.New("storage: signed URL expiry exceeds maximum")
 var ErrUnknownProvider = errors.New("storage: unknown provider")
 
-// Storage is the blob storage interface.
-// Uploads and downloads happen directly between the CLI and the provider
-// via signed URLs.
-type Storage interface {
-	// Returns short-lived URL for the CLI to call a PUT request for blobs
-	SignedPutURL(ctx context.Context, key string, expiry time.Duration) (string, error)
+// Object is the metadata for a stored blob, as returned by List.
+type Object struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
 
-	// Returns short-lived URL for the CLI to call a GET request for a blob
+type Storage interface {
+	SignedPutURL(ctx context.Context, key string, expiry time.Duration) (string, error)
 	SignedGetURL(ctx context.Context, key string, expiry time.Duration) (string, error)
 
-	// Removes blob at key.
-	// Never called from a CLI-driven user request directly
 	Delete(ctx context.Context, key string) error
+	List(ctx context.Context, prefix string, fn func(Object) error) error
 }
 
 type Config struct {

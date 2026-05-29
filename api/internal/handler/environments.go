@@ -33,6 +33,11 @@ func (h *Handler) CreateEnvironment(w http.ResponseWriter, r *http.Request) {
 		httpx.RespondError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid environment name")
 		return
 	}
+	// env_ is reserved for ids so a name can't shadow an id in the file path.
+	if strings.HasPrefix(strings.ToLower(name), "env_") {
+		httpx.RespondError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid environment name")
+		return
+	}
 
 	envID := ids.Environment()
 	createdAt := time.Now().UTC()

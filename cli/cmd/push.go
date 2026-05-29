@@ -52,16 +52,12 @@ Uses the nearest .invosit.json file as project root.
 		}
 
 		apiClient := apiclient.NewClient(creds.APIURL)
-		envID, err := resolveEnvID(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envName)
-		if err != nil {
-			return err
-		}
 
 		prepared, failed := prepareFiles(cmd, projectRoot, args)
 
 		for chunkStart := 0; chunkStart < len(prepared); chunkStart += pushBatchLimit {
 			chunkEnd := min(chunkStart+pushBatchLimit, len(prepared))
-			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envID, prepared[chunkStart:chunkEnd])
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, prepared[chunkStart:chunkEnd])
 			if err != nil {
 				return err
 			}
@@ -127,7 +123,7 @@ func prepareFile(projectRoot, arg string) (preparedFile, error) {
 
 // pushBatch runs the 2-step file creation process.
 // create pending file metadata -> retrieve and post to s3 with signed url -> call :complete
-func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, envID string, batch []preparedFile) (int, error) {
+func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []preparedFile) (int, error) {
 	ctx := cmd.Context()
 	stdout := cmd.OutOrStdout()
 	stderr := cmd.ErrOrStderr()
@@ -141,7 +137,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 		}
 	}
 
-	created, err := client.CreateFiles(ctx, token, workspaceID, envID, entries)
+	created, err := client.CreateFiles(ctx, token, workspaceID, environment, entries)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
 			return 0, errors.New("not logged in or session expired. run `invosit login` to authenticate")
@@ -184,7 +180,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 		return failed, nil
 	}
 
-	completed, err := client.CompleteFiles(ctx, token, workspaceID, envID, uploadedIDs)
+	completed, err := client.CompleteFiles(ctx, token, workspaceID, environment, uploadedIDs)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
 			return 0, errors.New("not logged in or session expired. run `invosit login` to authenticate")
@@ -226,22 +222,6 @@ func formatResultError(code, message string) string {
 	default:
 		return "unknown error"
 	}
-}
-
-func resolveEnvID(ctx context.Context, client *apiclient.Client, token, workspaceID, name string) (string, error) {
-	environments, err := client.GetEnvironments(ctx, token, workspaceID)
-	if err != nil {
-		if errors.Is(err, apiclient.ErrUnauthorized) {
-			return "", errors.New("not logged in or session expired. run `invosit login` to authenticate")
-		}
-		return "", fmt.Errorf("failed to list environments: %w", err)
-	}
-	for _, env := range environments {
-		if env.Name == name {
-			return env.ID, nil
-		}
-	}
-	return "", fmt.Errorf("environment %q not found in workspace", name)
 }
 
 // projectRelative constructs an invosit-valid path relative to project root
