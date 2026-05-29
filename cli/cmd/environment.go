@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/config"
 	"github.com/spf13/cobra"
@@ -24,7 +25,8 @@ var environmentCreateCmd = &cobra.Command{
 	Use:   "create <name>",
 	Short: "Creates a new environment in a workspace",
 	Long: `Creates a new environment in a workspace.
-Uses the currently active workspace unless --workspace is passed.
+Uses the currently active workspace.
+Optionally pass workspace ID with --workspace flag
 	`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -89,11 +91,31 @@ var environmentListCmd = &cobra.Command{
 			return nil
 		}
 
-		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		rows := make([][]string, 0, len(envs))
 		for _, env := range envs {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\n", env.ID, env.Name)
+			rows = append(rows, []string{
+				env.ID,
+				env.Name,
+				env.CreatedAt.Local().Format("2006-01-02 15:04"),
+			})
 		}
-		return tw.Flush()
+
+		headerStyle := lipgloss.NewStyle().Bold(true).Padding(0, 1)
+		cellStyle := lipgloss.NewStyle().Padding(0, 1)
+		environmentTable := table.New().
+			Border(lipgloss.NormalBorder()).
+			BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("240"))).
+			Headers("ID", "NAME", "CREATED").
+			Rows(rows...).
+			StyleFunc(func(row, _ int) lipgloss.Style {
+				if row == table.HeaderRow {
+					return headerStyle
+				}
+				return cellStyle
+			})
+
+		_, _ = fmt.Fprintln(out, environmentTable)
+		return nil
 	},
 }
 
@@ -110,7 +132,7 @@ func resolveWorkspace(ctx context.Context, client *apiclient.Client, token, flag
 
 	if flag != "" {
 		for i := range workspaces {
-			if workspaces[i].ID == flag || workspaces[i].Name == flag {
+			if workspaces[i].ID == flag {
 				return &workspaces[i], nil
 			}
 		}
@@ -133,8 +155,8 @@ func resolveWorkspace(ctx context.Context, client *apiclient.Client, token, flag
 }
 
 func init() {
-	environmentCreateCmd.Flags().StringVarP(&environmentCreateWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json)")
-	environmentListCmd.Flags().StringVarP(&environmentListWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json)")
+	environmentCreateCmd.Flags().StringVarP(&environmentCreateWorkspace, "workspace", "w", "", "Workspace ID (defaults to .invosit.json)")
+	environmentListCmd.Flags().StringVarP(&environmentListWorkspace, "workspace", "w", "", "Workspace ID (defaults to .invosit.json)")
 	environmentCmd.AddCommand(environmentCreateCmd)
 	environmentCmd.AddCommand(environmentListCmd)
 	rootCmd.AddCommand(environmentCmd)
