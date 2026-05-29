@@ -8,6 +8,7 @@ services:
 
   api:
     build: ./api
+    image: invosit-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -31,6 +32,32 @@ services:
     networks:
       - internal
       - proxy
+
+  sweep:
+    image: invosit-api
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER}
+      STORAGE_BUCKET: ${STORAGE_BUCKET}
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY}
+      STORAGE_REGION: ${STORAGE_REGION}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        umask 077
+        export -p > /app/cron.env
+        echo '0 3 * * * . /app/cron.env; /app/sweep >> /proc/1/fd/1 2>&1' > /etc/crontabs/root
+        exec crond -f -d 8
+    networks:
+      - internal
 
   postgres:
     image: postgres:16-alpine
