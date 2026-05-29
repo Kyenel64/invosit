@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -43,7 +44,7 @@ type CompleteFilesResult struct {
 	Message string    `json:"message,omitempty"`
 }
 
-func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environmentID string, files []CreateFileEntry) ([]CreateFilesResult, error) {
+func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environment string, files []CreateFileEntry) ([]CreateFilesResult, error) {
 	body, err := json.Marshal(struct {
 		Files []CreateFileEntry `json:"files"`
 	}{Files: files})
@@ -51,8 +52,8 @@ func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environmen
 		return nil, fmt.Errorf("encode create files request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files", c.baseURL, workspaceID, environmentID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	endpoint := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files", c.baseURL, workspaceID, url.PathEscape(environment))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build create files request: %w", err)
 	}
@@ -82,7 +83,7 @@ func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environmen
 	}
 }
 
-func (c *Client) CompleteFiles(ctx context.Context, token, workspaceID, environmentID string, fileIDs []string) ([]CompleteFilesResult, error) {
+func (c *Client) CompleteFiles(ctx context.Context, token, workspaceID, environment string, fileIDs []string) ([]CompleteFilesResult, error) {
 	body, err := json.Marshal(struct {
 		FileIDs []string `json:"file_ids"`
 	}{FileIDs: fileIDs})
@@ -90,8 +91,8 @@ func (c *Client) CompleteFiles(ctx context.Context, token, workspaceID, environm
 		return nil, fmt.Errorf("encode complete files request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files:complete", c.baseURL, workspaceID, environmentID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	endpoint := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files:complete", c.baseURL, workspaceID, url.PathEscape(environment))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build complete files request: %w", err)
 	}

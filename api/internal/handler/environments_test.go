@@ -87,6 +87,25 @@ func TestCreateEnvironment_MissingName(t *testing.T) {
 	}
 }
 
+func TestCreateEnvironment_RejectsEnvPrefixedName(t *testing.T) {
+	for _, name := range []string{"env_foo", "Env_Bar", "  env_baz  "} {
+		t.Run(name, func(t *testing.T) {
+			db, _, _ := sqlmock.New()
+			defer db.Close()
+
+			h := &Handler{db: db}
+			req := httptest.NewRequest(http.MethodPost, "/x",
+				strings.NewReader(`{"name":"`+name+`"}`)).WithContext(adminCtx())
+			rec := httptest.NewRecorder()
+			h.CreateEnvironment(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
 func TestCreateEnvironment_DuplicateReturns409(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
