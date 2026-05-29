@@ -1,6 +1,8 @@
 package kratos
 
-import ory "github.com/ory/client-go"
+import (
+	ory "github.com/ory/client-go"
+)
 
 type Client struct {
 	sdk *ory.APIClient
