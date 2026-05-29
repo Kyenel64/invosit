@@ -13,6 +13,8 @@ import (
 	"github.com/kyenel64/invosit/api/internal/sweep"
 )
 
+var errMissingDatabaseURL = errors.New("DATABASE_URL is required")
+
 func main() {
 	if err := run(context.Background(), os.Getenv, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -24,7 +26,7 @@ func main() {
 func run(ctx context.Context, getenv func(string) string, stdout, stderr io.Writer) error {
 	databaseURL := getenv("DATABASE_URL")
 	if databaseURL == "" {
-		return errors.New("DATABASE_URL is required")
+		return errMissingDatabaseURL
 	}
 
 	ttl := sweep.DefaultTTL
@@ -32,6 +34,9 @@ func run(ctx context.Context, getenv func(string) string, stdout, stderr io.Writ
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
 			return fmt.Errorf("failed to parse SWEEP_TTL: %w", err)
+		}
+		if parsed <= storage.MaxSignedURLExpiry {
+			return fmt.Errorf("SWEEP_TTL must be greater than %s to avoid sweeping uploads with live signed URLs", storage.MaxSignedURLExpiry)
 		}
 		ttl = parsed
 	}
