@@ -22,8 +22,11 @@ var environmentCreateWorkspace string
 
 var environmentCreateCmd = &cobra.Command{
 	Use:   "create <name>",
-	Short: "Create a new environment in a workspace",
-	Args:  cobra.ExactArgs(1),
+	Short: "Creates a new environment in a workspace",
+	Long: `Creates a new environment in a workspace.
+Uses the currently active workspace unless --workspace is passed.
+	`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := strings.TrimSpace(args[0])
 		if name == "" {
@@ -43,18 +46,10 @@ var environmentCreateCmd = &cobra.Command{
 
 		env, err := client.CreateEnvironment(cmd.Context(), creds.SessionToken, workspace.ID, name)
 		if err != nil {
-			switch {
-			case errors.Is(err, apiclient.ErrUnauthorized):
+			if errors.Is(err, apiclient.ErrUnauthorized) {
 				return errors.New("not logged in or session expired. run `invosit login` to authenticate")
-			case errors.Is(err, apiclient.ErrForbidden):
-				return errors.New("you need the admin role on this workspace to create environments")
-			case errors.Is(err, apiclient.ErrConflict):
-				return fmt.Errorf("environment %q already exists in workspace %q", name, workspace.Name)
-			case errors.Is(err, apiclient.ErrInvalidRequest):
-				return errors.New("invalid environment name (names cannot start with 'env_')")
-			default:
-				return err
 			}
+			return fmt.Errorf("failed to create environment: %w", err)
 		}
 
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created environment %q (%s) in workspace %q\n", name, env.ID, workspace.Name)
@@ -85,7 +80,7 @@ var environmentListCmd = &cobra.Command{
 			if errors.Is(err, apiclient.ErrUnauthorized) {
 				return errors.New("not logged in or session expired. run `invosit login` to authenticate")
 			}
-			return err
+			return fmt.Errorf("failed to list environments: %w", err)
 		}
 
 		out := cmd.OutOrStdout()
@@ -102,17 +97,15 @@ var environmentListCmd = &cobra.Command{
 	},
 }
 
-// resolveWorkspace picks the target workspace from, in order: the --workspace
-// flag (matched by ID or name), the workspaceId bound in .invosit.json, or an
-// interactive picker. It fetches the user's workspaces once to resolve the name
-// for output and to confirm access.
+// resolveWorkspace picks the target workspace from either the --workspace, -w flag
+// or the workspaceId bound in .invosit.json
 func resolveWorkspace(ctx context.Context, client *apiclient.Client, token, flag string) (*apiclient.Workspace, error) {
 	workspaces, err := client.GetWorkspaces(ctx, token)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
 			return nil, errors.New("not logged in or session expired. run `invosit login` to authenticate")
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to list workspaces: %w", err)
 	}
 
 	if flag != "" {
@@ -124,21 +117,24 @@ func resolveWorkspace(ctx context.Context, client *apiclient.Client, token, flag
 		return nil, fmt.Errorf("workspace %q not found or you don't have access", flag)
 	}
 
-	if cfg, _, err := loadProjectConfig(); err == nil && cfg.WorkspaceID != "" {
-		for i := range workspaces {
-			if workspaces[i].ID == cfg.WorkspaceID {
-				return &workspaces[i], nil
-			}
-		}
-		return nil, fmt.Errorf("workspace %q from %s not found or you don't have access", cfg.WorkspaceID, config.FileName)
+	cfg, _, err := loadProjectConfig()
+	if err != nil {
+		return nil, errors.New("no workspace specified. pass --workspace or run `invosit init` to bind one")
 	}
-
-	return pickWorkspace(workspaces)
+	if cfg.WorkspaceID == "" {
+		return nil, fmt.Errorf("no workspaceId in %s. pass --workspace or re-run `invosit init`", config.FileName)
+	}
+	for i := range workspaces {
+		if workspaces[i].ID == cfg.WorkspaceID {
+			return &workspaces[i], nil
+		}
+	}
+	return nil, fmt.Errorf("workspace %q from %s not found or you don't have access", cfg.WorkspaceID, config.FileName)
 }
 
 func init() {
-	environmentCreateCmd.Flags().StringVarP(&environmentCreateWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json, else interactive picker)")
-	environmentListCmd.Flags().StringVarP(&environmentListWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json, else interactive picker)")
+	environmentCreateCmd.Flags().StringVarP(&environmentCreateWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json)")
+	environmentListCmd.Flags().StringVarP(&environmentListWorkspace, "workspace", "w", "", "Workspace ID or name (defaults to .invosit.json)")
 	environmentCmd.AddCommand(environmentCreateCmd)
 	environmentCmd.AddCommand(environmentListCmd)
 	rootCmd.AddCommand(environmentCmd)

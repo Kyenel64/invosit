@@ -65,30 +65,16 @@ func TestCreateEnvironmentSuccess(t *testing.T) {
 	}
 }
 
-func TestCreateEnvironmentStatusMapping(t *testing.T) {
-	cases := []struct {
-		name   string
-		status int
-		want   error
-	}{
-		{"unauthorized", http.StatusUnauthorized, apiclient.ErrUnauthorized},
-		{"forbidden", http.StatusForbidden, apiclient.ErrForbidden},
-		{"conflict", http.StatusConflict, apiclient.ErrConflict},
-		{"invalid", http.StatusBadRequest, apiclient.ErrInvalidRequest},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.status)
-			}))
-			defer srv.Close()
+func TestCreateEnvironmentUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
 
-			c := apiclient.NewClient(srv.URL)
-			_, err := c.CreateEnvironment(context.Background(), "tok", "ws_1", "staging")
-			if !errors.Is(err, tc.want) {
-				t.Errorf("status %d: want %v, got %v", tc.status, tc.want, err)
-			}
-		})
+	c := apiclient.NewClient(srv.URL)
+	_, err := c.CreateEnvironment(context.Background(), "bad", "ws_1", "staging")
+	if !errors.Is(err, apiclient.ErrUnauthorized) {
+		t.Errorf("want ErrUnauthorized, got %v", err)
 	}
 }
 

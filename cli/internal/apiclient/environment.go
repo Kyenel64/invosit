@@ -80,12 +80,6 @@ func (c *Client) CreateEnvironment(ctx context.Context, token, workspaceID, name
 		return env, nil
 	case http.StatusUnauthorized:
 		return Environment{}, ErrUnauthorized
-	case http.StatusForbidden:
-		return Environment{}, ErrForbidden
-	case http.StatusConflict:
-		return Environment{}, ErrConflict
-	case http.StatusBadRequest:
-		return Environment{}, ErrInvalidRequest
 	default:
 		return Environment{}, fmt.Errorf("unexpected status: %d", res.StatusCode)
 	}
