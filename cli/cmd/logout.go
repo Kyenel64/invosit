@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kyenel64/invosit/cli/internal/credstore"
 	"github.com/kyenel64/invosit/cli/internal/kratos"
@@ -33,8 +35,10 @@ var logoutCmd = &cobra.Command{
 		}
 
 		if creds.SessionToken != "" {
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second) // Use timeout context instead of cmd Context which has no timeout
+			defer cancel()
 			kc := kratos.NewClient(creds.KratosURL)
-			if rErr := kc.Logout(cmd.Context(), creds.SessionToken); rErr != nil {
+			if rErr := kc.Logout(ctx, creds.SessionToken); rErr != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "could not revoke session server-side (offline?): %v; clearing local credentials anyway\n", rErr)
 			}
 		}
