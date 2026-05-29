@@ -87,10 +87,13 @@ The repo root holds monorepo-wide orchestration; the API lives under `api/`.
 invosit/                          # monorepo root
 ├── api/                          # ← this section describes everything under here
 │   ├── cmd/
-│   │   └── server/
-│   │       └── main.go           # startup, config loading, route registration
+│   │   ├── server/
+│   │   │   └── main.go           # startup, config loading, route registration
+│   │   └── sweep/
+│   │       └── main.go           # one-shot orphan-cleanup sweep (cron / manual)
 │   ├── internal/
 │   │   ├── kratos/               # thin Kratos client (whoami)
+│   │   ├── sweep/                # orphan cleanup logic (stale pending_files rows)
 │   │   ├── storage/              # storage interface + provider implementations
 │   │   │   ├── storage.go        # Storage interface, Config, New factory, errors, expiry validator
 │   │   │   └── s3.go             # AWS S3 + Cloudflare R2 (S3-compatible, diff endpoint)
@@ -593,6 +596,7 @@ type Storage interface {
     SignedPutURL(ctx context.Context, key string, expiry time.Duration) (string, error)
     SignedGetURL(ctx context.Context, key string, expiry time.Duration) (string, error)
     Delete(ctx context.Context, key string) error
+    List(ctx context.Context, prefix string, fn func(Object) error) error
 }
 ```
 
@@ -602,6 +606,10 @@ blob path. Adding server-side streaming methods would invite a handler to
 proxy bytes through the API, which breaks both the encryption boundary
 and R2's zero-egress economics. Add them only when a concrete handler
 needs them.
+
+`List` returns object *metadata* only (key, size, last-modified) — never blob
+bytes — so it stays outside the encryption boundary. It exists for the orphan
+sweep (see below), not for any CLI-driven request, and paginates internally.
 
 `Delete` is idempotent: deleting a non-existent key is a no-op, not an error.
 
@@ -619,6 +627,34 @@ Provider selected at startup via `STORAGE_PROVIDER`:
 
 R2 and S3 share one implementation — R2 is S3-compatible, different endpoint
 (plus `region=auto` and path-style addressing).
+
+### Orphan cleanup (sweep)
+
+Abandoned uploads and content-addressed blob sharing leave orphan state behind
+(see issue #62). Inline blob deletes were dropped from `CreateFiles`/`DeleteFile`
+in #61 because shared blobs made them unsafe, so cleanup is deferred to a sweep.
+There are two independent jobs:
+
+`internal/sweep.Run` performs both jobs in one pass, ordered so Step 1's deletes
+don't leave Step 2 shielding dead blobs. Run it via the one-shot `cmd/sweep`
+binary (cron-invoked, or `go run ./cmd/sweep`); it logs per-run counts. The
+binary needs `DATABASE_URL` and the `STORAGE_*` env (Step 2 lists the bucket),
+plus an optional `SWEEP_TTL` (Go duration) overriding the default 1h.
+
+- **Job A — stale `pending_files` rows** (shipped). A push is two-phase: `POST
+  .../files` inserts a `pending_files` row, the client uploads, `POST
+  .../files:complete` moves it into `files`. A CLI that dies before `:complete`
+  (or a completed row kept for `:complete` idempotency) leaves the row behind.
+  Step 1 deletes `pending_files` rows older than `DefaultTTL` (1h — safely above
+  `MaxSignedURLExpiry`).
+- **Job B — orphan blobs in S3** (shipped). The encrypted blobs that no `files`
+  row references (left by `DeleteFile`, overwrites, and the blob half of an
+  abandoned upload). Step 2 is a full-bucket scan: it loads the referenced set
+  (`files` ∪ `pending_files`), then for each blob older than the TTL that the set
+  doesn't reference, it does a final per-key `EXISTS` recheck (closing the
+  identical-content re-push race) before deleting. Blobs younger than the TTL and
+  unparseable keys are skipped. The churn-scaled candidate-queue is the documented
+  successor for multi-tenant cloud scale.
 
 ---
 

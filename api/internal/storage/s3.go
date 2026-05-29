@@ -95,3 +95,34 @@ func (s *s3Storage) Delete(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+func (s *s3Storage) List(ctx context.Context, prefix string, fn func(Object) error) error {
+	input := &s3.ListObjectsV2Input{Bucket: aws.String(s.bucket)}
+	if prefix != "" {
+		input.Prefix = aws.String(prefix)
+	}
+
+	paginator := s3.NewListObjectsV2Paginator(s.client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			out := Object{Key: *obj.Key}
+			if obj.Size != nil {
+				out.Size = *obj.Size
+			}
+			if obj.LastModified != nil {
+				out.LastModified = *obj.LastModified
+			}
+			if err := fn(out); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
