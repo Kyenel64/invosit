@@ -79,19 +79,6 @@ func TestListFilesUnauthorized(t *testing.T) {
 	}
 }
 
-func TestListFilesForbidden(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer srv.Close()
-
-	c := apiclient.NewClient(srv.URL)
-	_, err := c.ListFiles(context.Background(), "tok", "ws", "env")
-	if !errors.Is(err, apiclient.ErrForbidden) {
-		t.Errorf("want ErrForbidden, got %v", err)
-	}
-}
-
 func TestListFilesUnexpectedStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -103,7 +90,7 @@ func TestListFilesUnexpectedStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error on 500")
 	}
-	if errors.Is(err, apiclient.ErrUnauthorized) || errors.Is(err, apiclient.ErrForbidden) {
+	if errors.Is(err, apiclient.ErrUnauthorized) {
 		t.Errorf("500 should not map to a sentinel error")
 	}
 	if !strings.Contains(err.Error(), "500") {

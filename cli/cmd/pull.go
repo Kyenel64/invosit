@@ -55,8 +55,6 @@ Uses the nearest .invosit.json file as project root.
 			switch {
 			case errors.Is(err, apiclient.ErrUnauthorized):
 				return errors.New("not logged in or session expired. run `invosit login` to authenticate")
-			case errors.Is(err, apiclient.ErrForbidden):
-				return errors.New("access denied")
 			default:
 				return fmt.Errorf("failed to list files: %w", err)
 			}

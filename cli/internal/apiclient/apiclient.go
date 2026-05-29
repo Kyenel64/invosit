@@ -6,10 +6,7 @@ import (
 	"time"
 )
 
-var (
-	ErrUnauthorized = errors.New("unauthorized")
-	ErrForbidden    = errors.New("access denied")
-)
+var ErrUnauthorized = errors.New("unauthorized")
 
 type Client struct {
 	baseURL    string

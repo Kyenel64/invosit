@@ -76,8 +76,6 @@ func (c *Client) ListFiles(ctx context.Context, token, workspaceID, environment 
 		return envelope.Files, nil
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
-	case http.StatusForbidden:
-		return nil, ErrForbidden
 	default:
 		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
 	}
