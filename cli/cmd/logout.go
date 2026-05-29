@@ -11,7 +11,7 @@ import (
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
-	Short: "Logout and remove stored credentials",
+	Short: "Logout of invosit",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fileStore, err := credstore.NewFileStore("")
 		if err != nil {
@@ -24,8 +24,6 @@ var logoutCmd = &cobra.Command{
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "already logged out")
 				return nil
 			}
-			// Couldn't read the file (corrupt/insecure perms); still clear it
-			// so the user can recover by logging in again.
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "could not read credentials: %v; clearing local credentials anyway\n", err)
 			if cErr := fileStore.Clear(); cErr != nil {
 				return fmt.Errorf("failed to clear credentials: %w", cErr)
