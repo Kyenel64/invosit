@@ -12,6 +12,105 @@ import (
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 )
 
+func TestListFilesSuccess(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"files": [{
+				"id": "file_abc",
+				"environment_id": "env_xyz",
+				"path": "config/secret.env",
+				"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"size": 12,
+				"pushed_by": "usr_1",
+				"pushed_at": "2026-01-02T15:04:05Z",
+				"download_url": "https://blob.example/get?sig=1",
+				"download_expires_at": "2026-01-02T15:19:05Z"
+			}]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	res, err := c.ListFiles(context.Background(), "tok_xyz", "ws_1", "env_xyz")
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/api/v1/workspaces/ws_1/environments/env_xyz/files" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer tok_xyz" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if len(res) != 1 {
+		t.Fatalf("files = %d, want 1", len(res))
+	}
+	f0 := res[0]
+	if f0.ID != "file_abc" || f0.Path != "config/secret.env" || f0.Size != 12 {
+		t.Errorf("file decode mismatch: %+v", f0)
+	}
+	if f0.DownloadURL != "https://blob.example/get?sig=1" {
+		t.Errorf("download_url = %q", f0.DownloadURL)
+	}
+	if f0.DownloadExpiresAt.IsZero() || f0.PushedAt.IsZero() {
+		t.Errorf("timestamps should be parsed, got %+v", f0)
+	}
+}
+
+func TestListFilesUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	_, err := c.ListFiles(context.Background(), "bad", "ws", "env")
+	if !errors.Is(err, apiclient.ErrUnauthorized) {
+		t.Errorf("want ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestListFilesForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	_, err := c.ListFiles(context.Background(), "tok", "ws", "env")
+	if !errors.Is(err, apiclient.ErrForbidden) {
+		t.Errorf("want ErrForbidden, got %v", err)
+	}
+}
+
+func TestListFilesUnexpectedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	_, err := c.ListFiles(context.Background(), "tok", "ws", "env")
+	if err == nil {
+		t.Fatal("want error on 500")
+	}
+	if errors.Is(err, apiclient.ErrUnauthorized) || errors.Is(err, apiclient.ErrForbidden) {
+		t.Errorf("500 should not map to a sentinel error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention status code, got %v", err)
+	}
+}
+
 func TestCreateFilesSuccess(t *testing.T) {
 	var (
 		gotMethod, gotPath, gotAuth, gotContentType string
