@@ -151,13 +151,45 @@ func resolveWithinProject(projectRoot, relPath string) (string, error) {
 	cleaned := filepath.Clean(filepath.FromSlash(relPath))
 	dest := filepath.Join(realProjectRoot, cleaned)
 
-	rel, err := filepath.Rel(realProjectRoot, dest)
+	if err := withinRoot(realProjectRoot, dest); err != nil {
+		return "", err
+	}
+
+	// Lexical containment isn't enough. A symlinked directory inside the
+	// checkout can redirect the real write target outside the project, so
+	// resolve the deepest existing ancestor and reject it if it escapes.
+	ancestor := filepath.Dir(dest)
+	for {
+		resolved, err := filepath.EvalSymlinks(ancestor)
+		if err == nil {
+			if err := withinRoot(realProjectRoot, resolved); err != nil {
+				return "", err
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("failed to resolve destination path: %w", err)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", fmt.Errorf("failed to resolve destination path: %w", err)
+		}
+		ancestor = parent
+	}
+
+	return dest, nil
+}
+
+// withinRoot reports an error if path lies outside root (lexically). Both
+// arguments must already be cleaned, absolute, and symlink-resolved.
+func withinRoot(root, path string) error {
+	rel, err := filepath.Rel(root, path)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project-relative path: %w", err)
+		return fmt.Errorf("failed to resolve project-relative path: %w", err)
 	}
 	rel = filepath.ToSlash(rel)
 	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", errors.New("file is outside the project tree")
+		return errors.New("file is outside the project tree")
 	}
-	return dest, nil
+	return nil
 }
