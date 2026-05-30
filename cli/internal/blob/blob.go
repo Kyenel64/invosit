@@ -29,3 +29,26 @@ func Upload(ctx context.Context, signedURL string, body io.Reader, size int64) e
 	}
 	return nil
 }
+
+// Download streams a GET request from the s3 signed URL into dst
+func Download(ctx context.Context, signedURL string, dst io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)
+	if err != nil {
+		return fmt.Errorf("build download request: %w", err)
+	}
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download request failed: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("download returned status %d", res.StatusCode)
+	}
+
+	if _, err := io.Copy(dst, res.Body); err != nil {
+		return fmt.Errorf("download copy failed: %w", err)
+	}
+	return nil
+}

@@ -20,6 +20,12 @@ type FileMeta struct {
 	PushedAt      time.Time `json:"pushed_at"`
 }
 
+type ListedFileMeta struct {
+	FileMeta
+	DownloadURL       string    `json:"download_url"`
+	DownloadExpiresAt time.Time `json:"download_expires_at"`
+}
+
 type CreateFileEntry struct {
 	Path        string `json:"path"`
 	ContentHash string `json:"content_hash"`
@@ -42,6 +48,37 @@ type CompleteFilesResult struct {
 	File    *FileMeta `json:"file,omitempty"`
 	Code    string    `json:"code,omitempty"`
 	Message string    `json:"message,omitempty"`
+}
+
+func (c *Client) ListFiles(ctx context.Context, token, workspaceID, environment string) ([]ListedFileMeta, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/workspaces/%s/environments/%s/files", c.baseURL, workspaceID, url.PathEscape(environment))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build list files request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	res, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list files request failed: %w", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	switch res.StatusCode {
+	case http.StatusOK:
+		var envelope struct {
+			Files []ListedFileMeta `json:"files"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
+			return nil, fmt.Errorf("decode list files response: %w", err)
+		}
+		return envelope.Files, nil
+	case http.StatusUnauthorized:
+		return nil, ErrUnauthorized
+	default:
+		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+	}
 }
 
 func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environment string, files []CreateFileEntry) ([]CreateFilesResult, error) {

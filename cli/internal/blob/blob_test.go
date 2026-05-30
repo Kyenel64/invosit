@@ -62,3 +62,50 @@ func TestUploadNon2xx(t *testing.T) {
 		t.Errorf("error should mention status code, got %v", err)
 	}
 }
+
+func TestDownloadSuccess(t *testing.T) {
+	want := "hello world"
+
+	var (
+		gotMethod string
+		gotAuth   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(want))
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	err := blob.Download(context.Background(), srv.URL+"/get?sig=1", &buf)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %q, want GET", gotMethod)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization should be empty for signed-URL download, got %q", gotAuth)
+	}
+	if buf.String() != want {
+		t.Errorf("body = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestDownloadNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	var buf strings.Builder
+	err := blob.Download(context.Background(), srv.URL, &buf)
+	if err == nil {
+		t.Fatal("want error on 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status code, got %v", err)
+	}
+}
