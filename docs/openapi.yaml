@@ -784,6 +784,14 @@ components:
           type: integer
           description: File size in bytes
           example: 4096
+        version:
+          type: integer
+          description: |
+            Server-assigned optimistic-concurrency counter. Starts at 1 and
+            increments on every overwrite. Echo it back as `base_version` on the
+            next push to detect conflicting overwrites. Not meaningful on
+            CreateFiles results (the pending row is not committed yet).
+          example: 3
         pushed_by:
           type: string
           example: usr_def456
@@ -812,7 +820,7 @@ components:
 
     FilePushRequest:
       type: object
-      required: [path, content_hash, size]
+      required: [path, content_hash, size, base_version]
       properties:
         path:
           type: string
@@ -826,6 +834,15 @@ components:
           type: integer
           description: File size in bytes
           example: 4096
+        base_version:
+          type: integer
+          description: |
+            The committed version this push is based on (optimistic concurrency).
+            Use 0 to create a new file — the push fails with `code: CONFLICT` if
+            one already exists. Use the version last seen (from FileMeta.version)
+            to overwrite — fails with `CONFLICT` if the committed version has
+            moved on. Required; omitting it is rejected with INVALID_REQUEST.
+          example: 2
 
     CreateFilesRequest:
       type: object
@@ -872,7 +889,10 @@ components:
           enum: [error]
         code:
           type: string
-          description: Stable machine-readable error code (e.g. INVALID_REQUEST, INTERNAL_ERROR)
+          description: |
+            Stable machine-readable error code (e.g. INVALID_REQUEST,
+            INTERNAL_ERROR, or CONFLICT when the base_version no longer matches
+            the committed file).
           example: INVALID_REQUEST
         message:
           type: string
@@ -936,11 +956,15 @@ components:
           enum: [error]
         code:
           type: string
-          description: Stable machine-readable error code (e.g. FORBIDDEN, INTERNAL_ERROR)
-          example: FORBIDDEN
+          description: |
+            Stable machine-readable error code (e.g. FORBIDDEN, INTERNAL_ERROR,
+            or CONFLICT when the base_version no longer matches the committed
+            file). Clients map the code to a user-facing message.
+          example: CONFLICT
         message:
           type: string
-          example: access denied
+          description: Generic, client-agnostic detail. Clients localize off `code`, not this text.
+          example: "version conflict: file changed since the base version"
 
     CompleteFilesResult:
       oneOf:

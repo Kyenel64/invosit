@@ -16,6 +16,7 @@ type FileMeta struct {
 	Path          string    `json:"path"`
 	ContentHash   string    `json:"content_hash"`
 	Size          int64     `json:"size"`
+	Version       int64     `json:"version"`
 	PushedBy      string    `json:"pushed_by"`
 	PushedAt      time.Time `json:"pushed_at"`
 }
@@ -30,6 +31,7 @@ type CreateFileEntry struct {
 	Path        string `json:"path"`
 	ContentHash string `json:"content_hash"`
 	Size        int64  `json:"size"`
+	BaseVersion int64  `json:"base_version"`
 }
 
 type CreateFilesResult struct {
