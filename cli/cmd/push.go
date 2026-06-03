@@ -53,11 +53,16 @@ Uses the nearest .invosit.json file as project root.
 
 		apiClient := apiclient.NewClient(creds.APIURL)
 
+		versions, err := remoteVersions(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envName)
+		if err != nil {
+			return err
+		}
+
 		prepared, failed := prepareFiles(cmd, projectRoot, args)
 
 		for chunkStart := 0; chunkStart < len(prepared); chunkStart += pushBatchLimit {
 			chunkEnd := min(chunkStart+pushBatchLimit, len(prepared))
-			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, prepared[chunkStart:chunkEnd])
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, prepared[chunkStart:chunkEnd], versions)
 			if err != nil {
 				return err
 			}
@@ -81,6 +86,21 @@ type preparedFile struct {
 	content        []byte
 	hash           string
 	size           int64
+}
+
+func remoteVersions(ctx context.Context, client *apiclient.Client, token, workspaceID, environment string) (map[string]int64, error) {
+	files, err := client.ListFiles(ctx, token, workspaceID, environment)
+	if err != nil {
+		if errors.Is(err, apiclient.ErrUnauthorized) {
+			return nil, errors.New("not logged in or session expired. run `invosit login` to authenticate")
+		}
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+	versions := make(map[string]int64, len(files))
+	for _, file := range files {
+		versions[file.Path] = file.Version
+	}
+	return versions, nil
 }
 
 // prepareFiles resolves and hashes each arg. Failures are reported to stderr
@@ -123,7 +143,7 @@ func prepareFile(projectRoot, arg string) (preparedFile, error) {
 
 // pushBatch runs the 2-step file creation process.
 // create pending file metadata -> retrieve and post to s3 with signed url -> call :complete
-func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []preparedFile) (int, error) {
+func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []preparedFile, versions map[string]int64) (int, error) {
 	ctx := cmd.Context()
 	stdout := cmd.OutOrStdout()
 	stderr := cmd.ErrOrStderr()
@@ -134,6 +154,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			Path:        file.projectRelPath,
 			ContentHash: file.hash,
 			Size:        file.size,
+			BaseVersion: versions[file.projectRelPath],
 		}
 	}
 
@@ -212,6 +233,9 @@ func uploadOne(ctx context.Context, file preparedFile, signedURL string) error {
 }
 
 func formatResultError(code, message string) string {
+	if code == "CONFLICT" {
+		return "remote changed since you last pulled; run `invosit pull` then push again"
+	}
 	switch {
 	case code != "" && message != "":
 		return fmt.Sprintf("%s: %s", code, message)
