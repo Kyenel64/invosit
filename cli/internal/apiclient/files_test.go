@@ -27,6 +27,7 @@ func TestListFilesSuccess(t *testing.T) {
 				"path": "config/secret.env",
 				"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"size": 12,
+				"version": 5,
 				"pushed_by": "usr_1",
 				"pushed_at": "2026-01-02T15:04:05Z",
 				"download_url": "https://blob.example/get?sig=1",
@@ -57,6 +58,9 @@ func TestListFilesSuccess(t *testing.T) {
 	f0 := res[0]
 	if f0.ID != "file_abc" || f0.Path != "config/secret.env" || f0.Size != 12 {
 		t.Errorf("file decode mismatch: %+v", f0)
+	}
+	if f0.Version != 5 {
+		t.Errorf("version = %d, want 5", f0.Version)
 	}
 	if f0.DownloadURL != "https://blob.example/get?sig=1" {
 		t.Errorf("download_url = %q", f0.DownloadURL)
@@ -123,6 +127,7 @@ func TestCreateFilesSuccess(t *testing.T) {
 					"path": "secret.env",
 					"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 					"size": 12,
+					"version": 1,
 					"pushed_by": "usr_1",
 					"pushed_at": "2026-01-02T15:04:05Z"
 				},
@@ -138,6 +143,7 @@ func TestCreateFilesSuccess(t *testing.T) {
 		Path:        "secret.env",
 		ContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Size:        12,
+		BaseVersion: 2,
 	}})
 	if err != nil {
 		t.Fatalf("CreateFiles: %v", err)
@@ -158,12 +164,18 @@ func TestCreateFilesSuccess(t *testing.T) {
 	if len(gotBody.Files) != 1 || gotBody.Files[0].Path != "secret.env" || gotBody.Files[0].Size != 12 {
 		t.Errorf("request body roundtrip mismatch: %+v", gotBody)
 	}
+	if gotBody.Files[0].BaseVersion != 2 {
+		t.Errorf("base_version = %d, want 2 (sent as the push base)", gotBody.Files[0].BaseVersion)
+	}
 	if len(res) != 1 {
 		t.Fatalf("results = %d, want 1", len(res))
 	}
 	r0 := res[0]
 	if r0.Status != "ok" || r0.File == nil || r0.File.ID != "file_abc" || r0.UploadURL != "https://blob.example/put?sig=1" {
 		t.Errorf("response decode mismatch: %+v", r0)
+	}
+	if r0.File.Version != 1 {
+		t.Errorf("file.version = %d, want 1", r0.File.Version)
 	}
 	if r0.UploadExpiresAt == nil || r0.UploadExpiresAt.IsZero() || r0.File.PushedAt.IsZero() {
 		t.Errorf("timestamps should be parsed, got %+v", r0)

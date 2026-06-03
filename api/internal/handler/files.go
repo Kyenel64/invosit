@@ -12,9 +12,12 @@ import (
 	"github.com/kyenel64/invosit/api/internal/httpx"
 	"github.com/kyenel64/invosit/api/internal/ids"
 	"github.com/kyenel64/invosit/api/internal/storage"
+	"github.com/lib/pq"
 )
 
 const maxBatchSize = 100
+
+const conflictMessage = "version conflict: file changed since the base version"
 
 type fileMeta struct {
 	ID            string    `json:"id"`
@@ -22,6 +25,7 @@ type fileMeta struct {
 	Path          string    `json:"path"`
 	ContentHash   string    `json:"content_hash"`
 	Size          int64     `json:"size"`
+	Version       int64     `json:"version"`
 	PushedBy      string    `json:"pushed_by"`
 	PushedAt      time.Time `json:"pushed_at"`
 }
@@ -32,6 +36,7 @@ type createFileRequest struct {
 	Path        string `json:"path"`
 	ContentHash string `json:"content_hash"`
 	Size        int64  `json:"size"`
+	BaseVersion *int64 `json:"base_version"`
 }
 
 type createFilesRequest struct {
@@ -102,14 +107,38 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 	if entry.Size <= 0 {
 		return createErrorResult(path, "INVALID_REQUEST", "invalid size")
 	}
+	if entry.BaseVersion == nil {
+		return createErrorResult(path, "INVALID_REQUEST", "missing base version")
+	}
+	base := *entry.BaseVersion
+
+	// Check version early incase theres an obvious conflict.
+	// We check version on completeOne() as well incase version changes between each call.
+	var currentVersion int64
+	switch err := h.db.QueryRowContext(ctx,
+		`SELECT version FROM files WHERE environment_id = $1 AND path = $2`,
+		envID, path,
+	).Scan(&currentVersion); {
+	case errors.Is(err, sql.ErrNoRows):
+		if base != 0 {
+			return createErrorResult(path, "CONFLICT", conflictMessage)
+		}
+	case err != nil:
+		log.Printf("req=%s create_files_version_check_failed err=%v", httpx.RequestID(ctx), err)
+		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
+	default:
+		if base != currentVersion {
+			return createErrorResult(path, "CONFLICT", conflictMessage)
+		}
+	}
 
 	pushedAt := time.Now().UTC()
 	fileID := ids.File()
 
 	if _, err := h.db.ExecContext(ctx,
-		`INSERT INTO pending_files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		fileID, workspaceID, envID, path, entry.ContentHash, entry.Size, uid, pushedAt,
+		`INSERT INTO pending_files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at, expected_version)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		fileID, workspaceID, envID, path, entry.ContentHash, entry.Size, uid, pushedAt, base,
 	); err != nil {
 		log.Printf("req=%s create_files_insert_failed err=%v", httpx.RequestID(ctx), err)
 		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
@@ -215,17 +244,18 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 	var (
 		workspaceID, path, hash string
 		size                    int64
+		base                    int64
 		pushedBy                sql.NullString
 		pushedAt                time.Time
 		completedFileID         sql.NullString
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id
+		`SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id, expected_version
 		   FROM pending_files
 		  WHERE id = $1 AND environment_id = $2
 		    FOR UPDATE`,
 		fileID, envID,
-	).Scan(&workspaceID, &path, &hash, &size, &pushedBy, &pushedAt, &completedFileID)
+	).Scan(&workspaceID, &path, &hash, &size, &pushedBy, &pushedAt, &completedFileID, &base)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return h.completeAlreadyDone(ctx, envID, fileID)
@@ -238,20 +268,62 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		return h.completeAlreadyDone(ctx, envID, completedFileID.String)
 	}
 
-	var committedID string
-	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (environment_id, path) DO UPDATE
-		   SET content_hash = EXCLUDED.content_hash,
-		       size         = EXCLUDED.size,
-		       pushed_by    = EXCLUDED.pushed_by,
-		       pushed_at    = EXCLUDED.pushed_at
-		 RETURNING id`,
-		fileID, workspaceID, envID, path, hash, size, pushedBy.String, pushedAt,
-	).Scan(&committedID); err != nil {
-		log.Printf("req=%s complete_files_upsert_failed err=%v", httpx.RequestID(ctx), err)
+	// Compare-and-swap against the committed version. Lock the existing row (if
+	// any) so concurrent completes on the same path serialize through here.
+	var (
+		currentID      string
+		currentVersion int64
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, version FROM files WHERE environment_id = $1 AND path = $2 FOR UPDATE`,
+		envID, path,
+	).Scan(&currentID, &currentVersion)
+	fileExists := true
+	if errors.Is(err, sql.ErrNoRows) {
+		fileExists = false
+	} else if err != nil {
+		log.Printf("req=%s complete_files_select_current_failed err=%v", httpx.RequestID(ctx), err)
 		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+
+	var (
+		committedID string
+		newVersion  int64
+	)
+	switch base {
+	case 0: // expect absent → create
+		if fileExists {
+			return completeErrorResult(fileID, "CONFLICT", conflictMessage)
+		}
+		newVersion = 1
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at, version)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 RETURNING id`,
+			fileID, workspaceID, envID, path, hash, size, pushedBy.String, pushedAt, newVersion,
+		).Scan(&committedID); err != nil {
+			var pqErr *pq.Error
+			if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+				return completeErrorResult(fileID, "CONFLICT", conflictMessage)
+			}
+			log.Printf("req=%s complete_files_insert_failed err=%v", httpx.RequestID(ctx), err)
+			return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+		}
+	default: // expect committed version == base → update
+		if !fileExists || currentVersion != base {
+			return completeErrorResult(fileID, "CONFLICT", conflictMessage)
+		}
+		newVersion = currentVersion + 1
+		committedID = currentID
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE files
+			    SET content_hash = $1, size = $2, pushed_by = $3, pushed_at = $4, version = $5
+			  WHERE id = $6`,
+			hash, size, pushedBy.String, pushedAt, newVersion, committedID,
+		); err != nil {
+			log.Printf("req=%s complete_files_update_failed err=%v", httpx.RequestID(ctx), err)
+			return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,
@@ -276,6 +348,7 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 			Path:          path,
 			ContentHash:   hash,
 			Size:          size,
+			Version:       newVersion,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
 		},
@@ -286,15 +359,16 @@ func (h *Handler) completeAlreadyDone(ctx context.Context, envID, fileID string)
 	var (
 		path, hash string
 		size       int64
+		version    int64
 		pushedBy   sql.NullString
 		pushedAt   time.Time
 	)
 	err := h.db.QueryRowContext(ctx,
-		`SELECT path, content_hash, size, pushed_by, pushed_at
+		`SELECT path, content_hash, size, version, pushed_by, pushed_at
 		   FROM files
 		  WHERE id = $1 AND environment_id = $2`,
 		fileID, envID,
-	).Scan(&path, &hash, &size, &pushedBy, &pushedAt)
+	).Scan(&path, &hash, &size, &version, &pushedBy, &pushedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return completeErrorResult(fileID, "FORBIDDEN", "access denied")
@@ -311,6 +385,7 @@ func (h *Handler) completeAlreadyDone(ctx context.Context, envID, fileID string)
 			Path:          path,
 			ContentHash:   hash,
 			Size:          size,
+			Version:       version,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
 		},
@@ -347,7 +422,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	envID := httpx.EnvironmentID(r.Context())
 
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, path, content_hash, size, pushed_by, pushed_at
+		`SELECT id, path, content_hash, size, version, pushed_by, pushed_at
 		   FROM files
 		  WHERE environment_id = $1
 		  ORDER BY path ASC`,
@@ -364,10 +439,11 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 		var (
 			id, path, hash string
 			size           int64
+			version        int64
 			pushedBy       sql.NullString
 			pushedAt       time.Time
 		)
-		if err := rows.Scan(&id, &path, &hash, &size, &pushedBy, &pushedAt); err != nil {
+		if err := rows.Scan(&id, &path, &hash, &size, &version, &pushedBy, &pushedAt); err != nil {
 			httpx.InternalError(w, r, err)
 			return
 		}
@@ -383,6 +459,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 				Path:          path,
 				ContentHash:   hash,
 				Size:          size,
+				Version:       version,
 				PushedBy:      pushedBy.String,
 				PushedAt:      pushedAt,
 			},
@@ -414,15 +491,16 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 	var (
 		path, hash string
 		size       int64
+		version    int64
 		pushedBy   sql.NullString
 		pushedAt   time.Time
 	)
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT path, content_hash, size, pushed_by, pushed_at
+		`SELECT path, content_hash, size, version, pushed_by, pushed_at
 		   FROM files
 		  WHERE id = $1 AND environment_id = $2`,
 		fileID, envID,
-	).Scan(&path, &hash, &size, &pushedBy, &pushedAt)
+	).Scan(&path, &hash, &size, &version, &pushedBy, &pushedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
@@ -445,6 +523,7 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 			Path:          path,
 			ContentHash:   hash,
 			Size:          size,
+			Version:       version,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
 		},

@@ -227,11 +227,17 @@ environments
 
 files
   id, workspace_id, environment_id, path, content_hash,
-  size, pushed_by, pushed_at
+  size, version, pushed_by, pushed_at
   -- one row per (environment_id, path); push overwrites in place,
   -- the prior blob is best-effort deleted after commit. No version
   -- history is retained — keeping it on a secrets store reintroduces
   -- the property git is being avoided for. See GitHub issue #52.
+  -- version: server-assigned optimistic-concurrency counter (+1 per
+  -- overwrite), NOT retained history. A push sends the base version it
+  -- expects (0 = create); the commit-time compare-and-swap rejects it with
+  -- a per-item CONFLICT if the committed version has moved on. See #79.
+  -- (pending_files carries the matching expected_version through the
+  --  two-phase push.)
 
 wrapped_deks
   file_id, user_id, encrypted_dek
@@ -456,6 +462,12 @@ Every file access request must pass all four:
 
 Access is cryptographically enforced (layer 4), not just a permission check. A member
 with no wrapped DEK cannot decrypt the file even if they bypass the API.
+
+**Overwrite safety (push):** authorization gates *who* may write; an optimistic-concurrency
+compare-and-swap on `files.version` gates *what* they overwrite. A push declares the base
+version it expects; `completeOne` rejects it with a per-item `CONFLICT` if the committed
+version has moved on (no silent last-writer-wins). See #79; client sync-state and
+`invosit status` follow in #80/#81.
 
 **MVP status:** Layer 4 is not yet wired — file content is unencrypted in the
 M3 iteration (issue #11) so that the wire shape and storage plumbing can be

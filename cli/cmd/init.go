@@ -115,7 +115,7 @@ func chooseDefaultEnvironment(ctx context.Context, client *apiclient.Client, tok
 		return "", err
 	}
 	if len(environments) == 0 {
-		return "", fmt.Errorf("you don't have access to any environments in workspace: %s", workspaceID)
+		return "", nil
 	}
 
 	const skipLabel = "Skip (no default)"
