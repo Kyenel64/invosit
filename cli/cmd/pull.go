@@ -153,7 +153,7 @@ func planPull(localHash string, localExists bool, record syncstate.FileRecord, h
 		return pullDownload
 	case !localExists:
 		return pullDownload
-	case strings.EqualFold(localHash, remote.ContentHash):
+	case localHash == remote.ContentHash:
 		// M3 plaintext shortcut: at M4 the remote hash is ciphertext, so
 		// this row stops matching and the base comparisons below decide.
 		return pullUpToDate
@@ -216,7 +216,7 @@ func pullOne(ctx context.Context, dest string, file apiclient.ListedFileMeta) er
 		return fmt.Errorf("failed to download blob: %w", err)
 	}
 
-	if got := hex.EncodeToString(hasher.Sum(nil)); !strings.EqualFold(got, file.ContentHash) {
+	if got := hex.EncodeToString(hasher.Sum(nil)); got != file.ContentHash {
 		cleanup()
 		return errors.New("content hash mismatch: downloaded file is corrupt")
 	}

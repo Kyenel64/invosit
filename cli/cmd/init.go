@@ -53,7 +53,7 @@ var initCmd = &cobra.Command{
 		}
 
 		if err := syncstate.EnsureGitignored("."); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not update .gitignore: %v\n  add %s/ to .gitignore so local sync state is never committed\n", err, syncstate.DirName)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not update .gitignore: %v\n  add %s/ to .gitignore so local sync state is never committed\n", err, syncstate.DirName)
 		}
 		return nil
 	},

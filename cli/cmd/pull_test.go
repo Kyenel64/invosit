@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
@@ -48,12 +47,6 @@ func TestPlanPull(t *testing.T) {
 			name:      "local matches remote is up to date",
 			localHash: remoteHash, localExists: true, remote: movedRemote,
 			want: pullUpToDate,
-		},
-		{
-			name:      "remote hash comparison is case-insensitive",
-			localHash: remoteHash, localExists: true,
-			remote: listedFile("file_1", 5, strings.ToUpper(remoteHash)),
-			want:   pullUpToDate,
 		},
 		{
 			name:      "clean local fast-forwards",
