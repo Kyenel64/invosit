@@ -8,6 +8,7 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/config"
+	"github.com/kyenel64/invosit/cli/internal/syncstate"
 	"github.com/kyenel64/invosit/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -49,6 +50,10 @@ var initCmd = &cobra.Command{
 			fmt.Printf("Initialized %s (workspace: %s, no default environment — pass --env to push/pull)\n", config.FileName, workspace.Name)
 		} else {
 			fmt.Printf("Initialized %s (workspace: %s, default environment: %s)\n", config.FileName, workspace.Name, defaultEnv)
+		}
+
+		if err := syncstate.EnsureGitignored("."); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not update .gitignore: %v\n  add %s/ to .gitignore so local sync state is never committed\n", err, syncstate.DirName)
 		}
 		return nil
 	},

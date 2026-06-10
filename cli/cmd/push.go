@@ -13,18 +13,29 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/blob"
+	"github.com/kyenel64/invosit/cli/internal/syncstate"
 	"github.com/spf13/cobra"
 )
 
 const pushBatchLimit = 100
 
-var pushEnvFlag string
+var (
+	pushEnvFlag   string
+	pushForceFlag bool
+)
 
 var pushCmd = &cobra.Command{
 	Use:   "push <path> [path...]",
 	Short: "Push file(s) to invosit",
 	Long: `Push local files to invosit.
 Uses the nearest .invosit.json file as project root.
+
+Each push sends the version it was based on, so a file a teammate updated
+since your last pull is rejected instead of silently overwritten. Files
+unchanged since the last sync are skipped.
+
+--force overwrites the remote regardless of who changed it last. The
+replaced content is permanently unrecoverable: invosit keeps no history.
 	`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
@@ -53,21 +64,27 @@ Uses the nearest .invosit.json file as project root.
 
 		apiClient := apiclient.NewClient(creds.APIURL)
 
-		versions, err := remoteVersions(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envName)
+		remote, err := remoteFiles(cmd.Context(), apiClient, creds.SessionToken, cfg.WorkspaceID, envName)
 		if err != nil {
 			return err
 		}
 
-		prepared, failed := prepareFiles(cmd, projectRoot, args)
+		state := loadSyncState(cmd.ErrOrStderr(), projectRoot, cfg.WorkspaceID)
 
-		for chunkStart := 0; chunkStart < len(prepared); chunkStart += pushBatchLimit {
-			chunkEnd := min(chunkStart+pushBatchLimit, len(prepared))
-			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, prepared[chunkStart:chunkEnd], versions)
+		prepared, failed := prepareFiles(cmd, projectRoot, args)
+		planned := planFiles(cmd, dedupePrepared(prepared), envName, state, remote)
+
+		for chunkStart := 0; chunkStart < len(planned); chunkStart += pushBatchLimit {
+			chunkEnd := min(chunkStart+pushBatchLimit, len(planned))
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, planned[chunkStart:chunkEnd], state)
 			if err != nil {
+				saveSyncState(cmd.ErrOrStderr(), projectRoot, state)
 				return err
 			}
 			failed += batchFailed
 		}
+
+		saveSyncState(cmd.ErrOrStderr(), projectRoot, state)
 
 		if failed > 0 {
 			return fmt.Errorf("%d of %d files failed to push", failed, len(args))
@@ -78,6 +95,7 @@ Uses the nearest .invosit.json file as project root.
 
 func init() {
 	pushCmd.Flags().StringVar(&pushEnvFlag, "env", "", "environment name (overrides defaultEnvironment in .invosit.json)")
+	pushCmd.Flags().BoolVar(&pushForceFlag, "force", false, "overwrite the remote even if it changed since your last sync (unrecoverable)")
 	rootCmd.AddCommand(pushCmd)
 }
 
@@ -88,7 +106,81 @@ type preparedFile struct {
 	size           int64
 }
 
-func remoteVersions(ctx context.Context, client *apiclient.Client, token, workspaceID, environment string) (map[string]int64, error) {
+type plannedFile struct {
+	preparedFile
+	baseVersion int64
+}
+
+type pushPlan struct {
+	baseVersion int64
+	skip        bool
+	adopt       bool
+}
+
+// planPush decides the base version for the server CAS, or to skip the file.
+// adopt marks a skip whose merge-base should still be recorded (the local
+// file already matches the remote, e.g. after an interrupted sync).
+func planPush(localHash string, record syncstate.FileRecord, hasRecord bool, remote apiclient.FileMeta, hasRemote bool, force bool) pushPlan {
+	switch {
+	case force:
+		return pushPlan{baseVersion: remote.Version}
+	case hasRecord && localHash == record.ContentHash:
+		return pushPlan{skip: true}
+	case !hasRecord && hasRemote && localHash == remote.ContentHash:
+		return pushPlan{skip: true, adopt: true}
+	case hasRecord && !hasRemote:
+		return pushPlan{baseVersion: 0}
+	case hasRecord && remote.ID != record.FileID:
+		// Stale generation (deleted + recreated remotely); the create
+		// collision surfaces the server CONFLICT and its pull-first hint.
+		return pushPlan{baseVersion: 0}
+	case hasRecord:
+		return pushPlan{baseVersion: record.Version}
+	default:
+		return pushPlan{baseVersion: 0}
+	}
+}
+
+// planFiles classifies each prepared file against the sync state and the
+// remote inventory, reporting and recording skips.
+func planFiles(cmd *cobra.Command, prepared []preparedFile, envName string, state *syncstate.State, remote map[string]apiclient.FileMeta) []plannedFile {
+	stdout := cmd.OutOrStdout()
+	planned := make([]plannedFile, 0, len(prepared))
+	for _, file := range prepared {
+		record, hasRecord := state.Record(envName, file.projectRelPath)
+		remoteMeta, hasRemote := remote[file.projectRelPath]
+		plan := planPush(file.hash, record, hasRecord, remoteMeta, hasRemote, pushForceFlag)
+		if plan.skip {
+			if plan.adopt {
+				state.Put(envName, remoteMeta.EnvironmentID, file.projectRelPath, syncstate.FileRecord{
+					FileID:      remoteMeta.ID,
+					Version:     remoteMeta.Version,
+					ContentHash: file.hash,
+				})
+			}
+			_, _ = fmt.Fprintf(stdout, "up to date %s\n", file.projectRelPath)
+			continue
+		}
+		planned = append(planned, plannedFile{preparedFile: file, baseVersion: plan.baseVersion})
+	}
+	return planned
+}
+
+func dedupePrepared(prepared []preparedFile) []preparedFile {
+	lastByPath := make(map[string]int, len(prepared))
+	for index, file := range prepared {
+		lastByPath[file.projectRelPath] = index
+	}
+	deduped := make([]preparedFile, 0, len(lastByPath))
+	for index, file := range prepared {
+		if lastByPath[file.projectRelPath] == index {
+			deduped = append(deduped, file)
+		}
+	}
+	return deduped
+}
+
+func remoteFiles(ctx context.Context, client *apiclient.Client, token, workspaceID, environment string) (map[string]apiclient.FileMeta, error) {
 	files, err := client.ListFiles(ctx, token, workspaceID, environment)
 	if err != nil {
 		if errors.Is(err, apiclient.ErrUnauthorized) {
@@ -96,11 +188,11 @@ func remoteVersions(ctx context.Context, client *apiclient.Client, token, worksp
 		}
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
-	versions := make(map[string]int64, len(files))
+	remote := make(map[string]apiclient.FileMeta, len(files))
 	for _, file := range files {
-		versions[file.Path] = file.Version
+		remote[file.Path] = file.FileMeta
 	}
-	return versions, nil
+	return remote, nil
 }
 
 // prepareFiles resolves and hashes each arg. Failures are reported to stderr
@@ -143,7 +235,7 @@ func prepareFile(projectRoot, arg string) (preparedFile, error) {
 
 // pushBatch runs the 2-step file creation process.
 // create pending file metadata -> retrieve and post to s3 with signed url -> call :complete
-func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []preparedFile, versions map[string]int64) (int, error) {
+func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []plannedFile, state *syncstate.State) (int, error) {
 	ctx := cmd.Context()
 	stdout := cmd.OutOrStdout()
 	stderr := cmd.ErrOrStderr()
@@ -154,7 +246,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			Path:        file.projectRelPath,
 			ContentHash: file.hash,
 			Size:        file.size,
-			BaseVersion: versions[file.projectRelPath],
+			BaseVersion: file.baseVersion,
 		}
 	}
 
@@ -172,7 +264,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 	}
 
 	uploadedIDs := make([]string, 0, len(batch))
-	uploadedByID := make(map[string]preparedFile, len(batch))
+	uploadedByID := make(map[string]plannedFile, len(batch))
 	failed := 0
 
 	for _, file := range batch {
@@ -188,7 +280,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			continue
 		}
 
-		if err := uploadOne(ctx, file, result.UploadURL); err != nil {
+		if err := uploadOne(ctx, file.preparedFile, result.UploadURL); err != nil {
 			_, _ = fmt.Fprintf(stderr, "failed to push %s: %v\n", file.projectRelPath, err)
 			failed++
 			continue
@@ -218,6 +310,13 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			_, _ = fmt.Fprintf(stderr, "failed to push %s: %s\n", file.projectRelPath, formatResultError(result.Code, result.Message))
 			failed++
 			continue
+		}
+		if result.File != nil {
+			state.Put(environment, result.File.EnvironmentID, file.projectRelPath, syncstate.FileRecord{
+				FileID:      result.File.ID,
+				Version:     result.File.Version,
+				ContentHash: file.hash,
+			})
 		}
 		_, _ = fmt.Fprintf(stdout, "pushed %s (%d bytes)\n", file.projectRelPath, file.size)
 	}

@@ -3,9 +3,11 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/kyenel64/invosit/cli/internal/config"
+	"github.com/kyenel64/invosit/cli/internal/syncstate"
 )
 
 // loadProjectConfig returns the closest invosit config and the abs path of project root
@@ -22,4 +24,27 @@ func loadProjectConfig() (*config.Config, string, error) {
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
 	return cfg, filepath.Dir(configPath), nil
+}
+
+func loadSyncState(stderr io.Writer, projectRoot, workspaceID string) *syncstate.State {
+	state, err := syncstate.Load(projectRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
+	}
+	if !state.BoundTo(workspaceID) {
+		if state.WorkspaceID != "" {
+			_, _ = fmt.Fprintf(stderr, "warning: ignoring sync state bound to workspace %s\n", state.WorkspaceID)
+		}
+		return syncstate.New(workspaceID)
+	}
+	return state
+}
+
+func saveSyncState(stderr io.Writer, projectRoot string, state *syncstate.State) {
+	if !state.Dirty() {
+		return
+	}
+	if err := syncstate.Save(projectRoot, state); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
+	}
 }
