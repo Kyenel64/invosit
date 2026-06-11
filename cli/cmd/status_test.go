@@ -119,20 +119,20 @@ func TestRenderStatus(t *testing.T) {
 Environment: development
 
 Files:
-  (changed locally and remotely — resolve or pull --force)
+  (changed locally and remotely. resolve or pull --force)
   conflict  prod-keys.env
 
-  (differs from remote, no sync history — pull --force or push --force)
+  (differs from remote, no sync history. pull --force or push --force)
   conflict  zz-old.env
 
-  (remote is newer — pull)
+  (remote is newer. pull)
   behind    ca.pem
   behind    shared-cert.pem
 
-  (local edits — push)
+  (local edits. push)
   modified  app.env
 
-  (not on disk — pull)
+  (not on disk. pull)
   missing   legacy.env
 
   ok        database.env
