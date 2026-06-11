@@ -25,7 +25,7 @@ func TestListFilesSuccess(t *testing.T) {
 				"id": "file_abc",
 				"environment_id": "env_xyz",
 				"path": "config/secret.env",
-				"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"content_hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 				"size": 12,
 				"version": 5,
 				"pushed_by": "usr_1",
@@ -61,6 +61,9 @@ func TestListFilesSuccess(t *testing.T) {
 	}
 	if f0.Version != 5 {
 		t.Errorf("version = %d, want 5", f0.Version)
+	}
+	if f0.ContentHash != strings.Repeat("a", 64) {
+		t.Errorf("content_hash should be lowercased, got %q", f0.ContentHash)
 	}
 	if f0.DownloadURL != "https://blob.example/get?sig=1" {
 		t.Errorf("download_url = %q", f0.DownloadURL)
@@ -125,7 +128,7 @@ func TestCreateFilesSuccess(t *testing.T) {
 					"id": "file_abc",
 					"environment_id": "env_xyz",
 					"path": "secret.env",
-					"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"content_hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 					"size": 12,
 					"version": 1,
 					"pushed_by": "usr_1",
@@ -176,6 +179,9 @@ func TestCreateFilesSuccess(t *testing.T) {
 	}
 	if r0.File.Version != 1 {
 		t.Errorf("file.version = %d, want 1", r0.File.Version)
+	}
+	if r0.File.ContentHash != strings.Repeat("a", 64) {
+		t.Errorf("content_hash should be lowercased, got %q", r0.File.ContentHash)
 	}
 	if r0.UploadExpiresAt == nil || r0.UploadExpiresAt.IsZero() || r0.File.PushedAt.IsZero() {
 		t.Errorf("timestamps should be parsed, got %+v", r0)
@@ -235,7 +241,7 @@ func TestCompleteFilesSuccess(t *testing.T) {
 					"id": "file_abc",
 					"environment_id": "env_xyz",
 					"path": "secret.env",
-					"content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"content_hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 					"size": 12,
 					"pushed_by": "usr_1",
 					"pushed_at": "2026-01-02T15:04:05Z"
@@ -261,6 +267,9 @@ func TestCompleteFilesSuccess(t *testing.T) {
 	}
 	if len(res) != 1 || res[0].Status != "ok" || res[0].ID != "file_abc" {
 		t.Errorf("response mismatch: %+v", res)
+	}
+	if res[0].File == nil || res[0].File.ContentHash != strings.Repeat("a", 64) {
+		t.Errorf("content_hash should be lowercased, got %+v", res[0].File)
 	}
 }
 

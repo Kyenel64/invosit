@@ -13,16 +13,22 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/blob"
+	"github.com/kyenel64/invosit/cli/internal/syncstate"
 	"github.com/spf13/cobra"
 )
 
-var pullEnvFlag string
+var (
+	pullEnvFlag   string
+	pullForceFlag bool
+)
 
 var pullCmd = &cobra.Command{
 	Use:   "pull",
 	Short: "Pull file(s) from invosit",
 	Long: `Pull all files tracked in the target environment into the project tree.
 Uses the nearest .invosit.json file as project root.
+
+--force overwrites local files unconditionally.
 	`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -60,18 +66,64 @@ Uses the nearest .invosit.json file as project root.
 			}
 		}
 
+		state := loadSyncState(stderr, projectRoot, cfg.WorkspaceID)
+
 		failed := 0
+		blocked := 0
+		remotePaths := make(map[string]struct{}, len(files))
 		for _, file := range files {
-			if err := pullOne(ctx, projectRoot, file); err != nil {
+			remotePaths[file.Path] = struct{}{}
+
+			dest, err := resolveWithinProject(projectRoot, file.Path)
+			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "failed to pull %s: %v\n", file.Path, err)
 				failed++
 				continue
 			}
-			_, _ = fmt.Fprintf(stdout, "pulled %s (%d bytes)\n", file.Path, file.Size)
+
+			localHash, localExists, err := localFileHash(dest)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "failed to pull %s: %v\n", file.Path, err)
+				failed++
+				continue
+			}
+
+			record, hasRecord := state.Record(envName, file.Path)
+			base := syncstate.FileRecord{FileID: file.ID, Version: file.Version, ContentHash: file.ContentHash}
+
+			switch planPull(localHash, localExists, record, hasRecord, file, pullForceFlag) {
+			case pullDownload:
+				if err := pullOne(ctx, dest, file); err != nil {
+					_, _ = fmt.Fprintf(stderr, "failed to pull %s: %v\n", file.Path, err)
+					failed++
+					continue
+				}
+				state.Put(envName, file.EnvironmentID, file.Path, base)
+				_, _ = fmt.Fprintf(stdout, "pulled %s (%d bytes)\n", file.Path, file.Size)
+			case pullUpToDate:
+				state.Put(envName, file.EnvironmentID, file.Path, base)
+				_, _ = fmt.Fprintf(stdout, "up to date %s\n", file.Path)
+			case pullLocalOnly:
+				_, _ = fmt.Fprintf(stdout, "skipped %s (local changes, remote unchanged)\n", file.Path)
+			case pullConflict:
+				_, _ = fmt.Fprintf(stderr, "conflict: %s changed locally and remotely; skipped (pull --force overwrites local)\n", file.Path)
+				blocked++
+			case pullRefuse:
+				_, _ = fmt.Fprintf(stderr, "refusing to overwrite %s: local file differs and no sync state exists (pull --force overwrites local)\n", file.Path)
+				blocked++
+			}
 		}
 
-		if failed > 0 {
+		state.Prune(envName, remotePaths)
+		saveSyncState(stderr, projectRoot, state)
+
+		switch {
+		case failed > 0 && blocked > 0:
+			return fmt.Errorf("%d of %d files failed to pull; %d skipped due to conflicts", failed, len(files), blocked)
+		case failed > 0:
 			return fmt.Errorf("%d of %d files failed to pull", failed, len(files))
+		case blocked > 0:
+			return fmt.Errorf("%d of %d files skipped due to conflicts; resolve or pull --force", blocked, len(files))
 		}
 		return nil
 	},
@@ -79,18 +131,70 @@ Uses the nearest .invosit.json file as project root.
 
 func init() {
 	pullCmd.Flags().StringVar(&pullEnvFlag, "env", "", "environment name (overrides defaultEnvironment in .invosit.json)")
+	pullCmd.Flags().BoolVar(&pullForceFlag, "force", false, "overwrite local files even if they have local changes (unrecoverable)")
 	rootCmd.AddCommand(pullCmd)
 }
 
-// pullOne downloads a single file, verifies its SHA-256 against the manifest
-// entry, and atomically writes it to its project-relative path. On any failure
-// the existing local file is left untouched.
-func pullOne(ctx context.Context, projectRoot string, file apiclient.ListedFileMeta) error {
-	dest, err := resolveWithinProject(projectRoot, file.Path)
+type pullAction int
+
+const (
+	pullDownload pullAction = iota
+	pullUpToDate
+	pullLocalOnly
+	pullConflict
+	pullRefuse
+)
+
+// planPull is the three-way compare between the local file, the last synced
+// merge-base, and the remote file.
+func planPull(localHash string, localExists bool, record syncstate.FileRecord, hasRecord bool, remote apiclient.ListedFileMeta, force bool) pullAction {
+	switch {
+	case force:
+		return pullDownload
+	case !localExists:
+		return pullDownload
+	case localHash == remote.ContentHash:
+		// M3 plaintext shortcut: at M4 the remote hash is ciphertext, so
+		// this row stops matching and the base comparisons below decide.
+		return pullUpToDate
+	case hasRecord && localHash == record.ContentHash:
+		return pullDownload
+	case hasRecord && remote.ID == record.FileID && remote.Version == record.Version:
+		return pullLocalOnly
+	case hasRecord:
+		return pullConflict
+	default:
+		return pullRefuse
+	}
+}
+
+// localFileHash hashes the file at path; exists is false when it is absent.
+// Non-regular files (directories, sockets) are an error, never a download
+// target.
+func localFileHash(path string) (hash string, exists bool, err error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
 	if err != nil {
-		return err
+		return "", false, fmt.Errorf("failed to stat local file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, errors.New("local path is not a regular file")
 	}
 
+	content, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return "", false, fmt.Errorf("failed to read local file: %w", err)
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), true, nil
+}
+
+// pullOne downloads a single file, verifies its SHA-256 against the manifest
+// entry, and atomically writes it to dest. On any failure the existing local
+// file is left untouched.
+func pullOne(ctx context.Context, dest string, file apiclient.ListedFileMeta) error {
 	destDir := filepath.Dir(dest)
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -112,7 +216,7 @@ func pullOne(ctx context.Context, projectRoot string, file apiclient.ListedFileM
 		return fmt.Errorf("failed to download blob: %w", err)
 	}
 
-	if got := hex.EncodeToString(hasher.Sum(nil)); !strings.EqualFold(got, file.ContentHash) {
+	if got := hex.EncodeToString(hasher.Sum(nil)); got != file.ContentHash {
 		cleanup()
 		return errors.New("content hash mismatch: downloaded file is corrupt")
 	}

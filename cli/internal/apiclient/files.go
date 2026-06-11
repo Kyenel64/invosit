@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -25,6 +26,13 @@ type ListedFileMeta struct {
 	FileMeta
 	DownloadURL       string    `json:"download_url"`
 	DownloadExpiresAt time.Time `json:"download_expires_at"`
+}
+
+func (meta *FileMeta) normalize() {
+	if meta == nil {
+		return
+	}
+	meta.ContentHash = strings.ToLower(meta.ContentHash)
 }
 
 type CreateFileEntry struct {
@@ -75,6 +83,9 @@ func (c *Client) ListFiles(ctx context.Context, token, workspaceID, environment 
 		if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
 			return nil, fmt.Errorf("decode list files response: %w", err)
 		}
+		for index := range envelope.Files {
+			envelope.Files[index].normalize()
+		}
 		return envelope.Files, nil
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
@@ -114,6 +125,9 @@ func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environmen
 		if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
 			return nil, fmt.Errorf("decode create files response: %w", err)
 		}
+		for _, result := range envelope.Results {
+			result.File.normalize()
+		}
 		return envelope.Results, nil
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
@@ -152,6 +166,9 @@ func (c *Client) CompleteFiles(ctx context.Context, token, workspaceID, environm
 		}
 		if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
 			return nil, fmt.Errorf("decode complete files response: %w", err)
+		}
+		for _, result := range envelope.Results {
+			result.File.normalize()
 		}
 		return envelope.Results, nil
 	case http.StatusUnauthorized:
