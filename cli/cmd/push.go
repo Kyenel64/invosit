@@ -264,7 +264,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 	}
 
 	uploadedIDs := make([]string, 0, len(batch))
-	uploadedByID := make(map[string]plannedFile, len(batch))
+	uploadedFiles := make([]plannedFile, 0, len(batch))
 	failed := 0
 
 	for _, file := range batch {
@@ -286,7 +286,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			continue
 		}
 		uploadedIDs = append(uploadedIDs, result.File.ID)
-		uploadedByID[result.File.ID] = file
+		uploadedFiles = append(uploadedFiles, file)
 	}
 
 	if len(uploadedIDs) == 0 {
@@ -301,11 +301,14 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 		return 0, fmt.Errorf("failed to complete files with api: %w", err)
 	}
 
-	for _, result := range completed {
-		file, ok := uploadedByID[result.ID]
-		if !ok {
-			continue
+	// completeOne returns one result per requested id in request order, so
+	// pair positionally: an overwrite's committed id differs from the pending
+	// id we sent, so matching by result.ID would miss it.
+	for index, result := range completed {
+		if index >= len(uploadedFiles) {
+			break
 		}
+		file := uploadedFiles[index]
 		if result.Status != "ok" {
 			_, _ = fmt.Fprintf(stderr, "failed to push %s: %s\n", file.projectRelPath, formatResultError(result.Code, result.Message))
 			failed++
