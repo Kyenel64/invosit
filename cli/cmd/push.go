@@ -54,12 +54,9 @@ replaced content is permanently unrecoverable: invosit keeps no history.
 			return err
 		}
 
-		envName := pushEnvFlag
-		if envName == "" {
-			envName = cfg.DefaultEnvironment
-		}
-		if envName == "" {
-			return errors.New("no environment set. pass --env <name> or set defaultEnvironment in .invosit.json")
+		envName, err := resolveEnvName(pushEnvFlag, cfg)
+		if err != nil {
+			return err
 		}
 
 		apiClient := apiclient.NewClient(creds.APIURL)

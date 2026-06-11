@@ -42,12 +42,9 @@ Uses the nearest .invosit.json file as project root.
 			return err
 		}
 
-		envName := pullEnvFlag
-		if envName == "" {
-			envName = cfg.DefaultEnvironment
-		}
-		if envName == "" {
-			return errors.New("no environment set. pass --env <name> or set defaultEnvironment in .invosit.json")
+		envName, err := resolveEnvName(pullEnvFlag, cfg)
+		if err != nil {
+			return err
 		}
 
 		ctx := cmd.Context()

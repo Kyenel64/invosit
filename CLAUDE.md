@@ -325,6 +325,14 @@ Built on Cobra; structured the same way as the API server with thin
   JSON config at `.invosit.json`. If a config already exists, prompts
   to overwrite via the same picker. Mirrors `git init` (binding only — no
   data fetched).
+- **`invosit status`** — read-only sync report for the target environment
+  (`--env` / `defaultEnvironment`). Three-way compares each remotely tracked
+  file (local content vs the `.invosit/state.json` merge-base vs the API's
+  current version) and prints one flat color-coded line per file —
+  `conflict` / `behind` / `modified` / `missing` / `ok` — sorted
+  most-urgent-first with an action hint and a summary count line. Colors
+  degrade to plain text when piped (grep-able). Exits 0 even with conflicts
+  (informational); never writes files or sync state. See `cmd/status.go`.
 - **Credentials at rest** — `credstore.FileStore` writes
   `<user-config-dir>/invosit/credentials.json` at `0600` via a
   write-temp-then-rename atomic swap, and refuses to load files with

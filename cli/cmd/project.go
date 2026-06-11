@@ -26,6 +26,19 @@ func loadProjectConfig() (*config.Config, string, error) {
 	return cfg, filepath.Dir(configPath), nil
 }
 
+// resolveEnvName returns the target environment: the --env flag value when
+// set, otherwise the config's defaultEnvironment.
+func resolveEnvName(flagValue string, cfg *config.Config) (string, error) {
+	envName := flagValue
+	if envName == "" {
+		envName = cfg.DefaultEnvironment
+	}
+	if envName == "" {
+		return "", errors.New("no environment set. pass --env <name> or set defaultEnvironment in .invosit.json")
+	}
+	return envName, nil
+}
+
 func loadSyncState(stderr io.Writer, projectRoot, workspaceID string) *syncstate.State {
 	state, err := syncstate.Load(projectRoot)
 	if err != nil {
