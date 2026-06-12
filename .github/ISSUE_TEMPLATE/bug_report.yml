@@ -1,6 +1,5 @@
 name: Bug report
 description: Report a bug in Invosit
-title: "Bug: "
 labels: ["bug"]
 body:
   - type: dropdown
