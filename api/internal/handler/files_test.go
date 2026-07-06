@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -80,11 +81,12 @@ func TestListFiles_Success(t *testing.T) {
 	defer db.Close()
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
-	mock.ExpectQuery(`SELECT id, path, content_hash, size, version, pushed_by, pushed_at\s+FROM files\s+WHERE environment_id = \$1`).
-		WithArgs("env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at"}).
-			AddRow("file_a", "a.env", validHash, int64(10), int64(1), "usr_abc", pushedAt).
-			AddRow("file_b", "b.env", validHash, int64(20), int64(4), "usr_xyz", pushedAt))
+	wrappedDEK := []byte("wrapped-dek-for-caller")
+	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
+		WithArgs("env_abc", "usr_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
+			AddRow("file_a", "a.env", validHash, int64(10), int64(1), "usr_abc", pushedAt, wrappedDEK).
+			AddRow("file_b", "b.env", validHash, int64(20), int64(4), "usr_xyz", pushedAt, nil))
 
 	stub := &stubStorage{getURL: "https://signed/get"}
 	h := &Handler{db: db, blobs: stub}
@@ -121,15 +123,23 @@ func TestListFiles_Success(t *testing.T) {
 	if got.Files[0]["version"] != float64(1) {
 		t.Errorf("files[0] version = %v, want 1", got.Files[0]["version"])
 	}
+	// The caller's wrapped DEK is inlined when a wrapped_deks row exists, and
+	// the field is omitted entirely when it does not.
+	if got.Files[0]["wrapped_dek"] != base64.StdEncoding.EncodeToString(wrappedDEK) {
+		t.Errorf("files[0] wrapped_dek = %v, want base64 of caller DEK", got.Files[0]["wrapped_dek"])
+	}
+	if _, present := got.Files[1]["wrapped_dek"]; present {
+		t.Errorf("files[1] should omit wrapped_dek when the caller has no row")
+	}
 }
 
 func TestListFiles_Empty(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT id, path, content_hash, size, version, pushed_by, pushed_at\s+FROM files\s+WHERE environment_id = \$1`).
-		WithArgs("env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at"}))
+	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
+		WithArgs("env_abc", "usr_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}))
 
 	stub := &stubStorage{}
 	h := &Handler{db: db, blobs: stub}
@@ -161,10 +171,11 @@ func TestGetFile_Success(t *testing.T) {
 	defer db.Close()
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
-	mock.ExpectQuery(`SELECT path, content_hash, size, version, pushed_by, pushed_at\s+FROM files\s+WHERE id = \$1 AND environment_id = \$2`).
-		WithArgs("file_xyz", "env_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "version", "pushed_by", "pushed_at"}).
-			AddRow("a.env", validHash, int64(123), int64(2), "usr_abc", pushedAt))
+	wrappedDEK := []byte("wrapped-dek-for-caller")
+	mock.ExpectQuery(`SELECT f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$3\s+WHERE f.id = \$1 AND f.environment_id = \$2`).
+		WithArgs("file_xyz", "env_abc", "usr_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
+			AddRow("a.env", validHash, int64(123), int64(2), "usr_abc", pushedAt, wrappedDEK))
 
 	stub := &stubStorage{getURL: "https://signed/get"}
 	h := &Handler{db: db, blobs: stub}
@@ -190,8 +201,42 @@ func TestGetFile_Success(t *testing.T) {
 	if _, present := got["status"]; present {
 		t.Errorf("response should not include a status field")
 	}
+	if got["wrapped_dek"] != base64.StdEncoding.EncodeToString(wrappedDEK) {
+		t.Errorf("wrapped_dek = %v, want base64 of caller DEK", got["wrapped_dek"])
+	}
 	if stub.getCalls != 1 {
 		t.Errorf("getCalls = %d, want 1", stub.getCalls)
+	}
+}
+
+// With the caller having no wrapped_deks row, the file is still returned (the
+// transitional read path) but wrapped_dek is omitted. The strict no-row-→-403
+// enforcement lands with the write path in a later iteration.
+func TestGetFile_NoWrappedDEKOmitsField(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
+		WithArgs("file_xyz", "env_abc", "usr_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
+			AddRow("a.env", validHash, int64(123), int64(2), "usr_abc", pushedAt, nil))
+
+	h := &Handler{db: db, blobs: &stubStorage{getURL: "https://signed/get"}}
+	req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(pushCtx())
+	req.SetPathValue("fileId", "file_xyz")
+	rec := httptest.NewRecorder()
+	h.GetFile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := got["wrapped_dek"]; present {
+		t.Errorf("wrapped_dek should be omitted when the caller has no row")
 	}
 }
 
@@ -202,8 +247,8 @@ func TestGetFile_PendingHiddenReturns403(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT path, content_hash`).
-		WithArgs("file_pending", "env_abc").
+	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
+		WithArgs("file_pending", "env_abc", "usr_abc").
 		WillReturnError(sql.ErrNoRows)
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
@@ -221,8 +266,8 @@ func TestGetFile_NotFoundReturns403(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT path, content_hash`).
-		WithArgs("file_missing", "env_abc").
+	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
+		WithArgs("file_missing", "env_abc", "usr_abc").
 		WillReturnError(sql.ErrNoRows)
 
 	h := &Handler{db: db, blobs: &stubStorage{}}

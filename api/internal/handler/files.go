@@ -28,6 +28,7 @@ type fileMeta struct {
 	Version       int64     `json:"version"`
 	PushedBy      string    `json:"pushed_by"`
 	PushedAt      time.Time `json:"pushed_at"`
+	WrappedDEK    []byte    `json:"wrapped_dek,omitempty"`
 }
 
 // --- Create Files ----------------------------------------------------------
@@ -414,7 +415,8 @@ type listFilesResponse struct {
 }
 
 func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
-	if httpx.UserID(r.Context()) == "" {
+	uid := httpx.UserID(r.Context())
+	if uid == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
 		return
 	}
@@ -422,11 +424,12 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	envID := httpx.EnvironmentID(r.Context())
 
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, path, content_hash, size, version, pushed_by, pushed_at
-		   FROM files
-		  WHERE environment_id = $1
-		  ORDER BY path ASC`,
-		envID,
+		`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek
+		   FROM files f
+		   LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $2
+		  WHERE f.environment_id = $1
+		  ORDER BY f.path ASC`,
+		envID, uid,
 	)
 	if err != nil {
 		httpx.InternalError(w, r, err)
@@ -442,8 +445,9 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 			version        int64
 			pushedBy       sql.NullString
 			pushedAt       time.Time
+			wrappedDEK     []byte // never log these bytes.
 		)
-		if err := rows.Scan(&id, &path, &hash, &size, &version, &pushedBy, &pushedAt); err != nil {
+		if err := rows.Scan(&id, &path, &hash, &size, &version, &pushedBy, &pushedAt, &wrappedDEK); err != nil {
 			httpx.InternalError(w, r, err)
 			return
 		}
@@ -462,6 +466,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 				Version:       version,
 				PushedBy:      pushedBy.String,
 				PushedAt:      pushedAt,
+				WrappedDEK:    wrappedDEK,
 			},
 			DownloadURL:       downloadURL,
 			DownloadExpiresAt: time.Now().UTC().Add(storage.MaxSignedURLExpiry),
@@ -476,7 +481,8 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
-	if httpx.UserID(r.Context()) == "" {
+	uid := httpx.UserID(r.Context())
+	if uid == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
 		return
 	}
@@ -494,13 +500,15 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 		version    int64
 		pushedBy   sql.NullString
 		pushedAt   time.Time
+		wrappedDEK []byte // never log these bytes.
 	)
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT path, content_hash, size, version, pushed_by, pushed_at
-		   FROM files
-		  WHERE id = $1 AND environment_id = $2`,
-		fileID, envID,
-	).Scan(&path, &hash, &size, &version, &pushedBy, &pushedAt)
+		`SELECT f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek
+		   FROM files f
+		   LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $3
+		  WHERE f.id = $1 AND f.environment_id = $2`,
+		fileID, envID, uid,
+	).Scan(&path, &hash, &size, &version, &pushedBy, &pushedAt, &wrappedDEK)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
@@ -526,6 +534,7 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 			Version:       version,
 			PushedBy:      pushedBy.String,
 			PushedAt:      pushedAt,
+			WrappedDEK:    wrappedDEK,
 		},
 		DownloadURL:       downloadURL,
 		DownloadExpiresAt: time.Now().UTC().Add(storage.MaxSignedURLExpiry),
