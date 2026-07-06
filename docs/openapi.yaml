@@ -798,6 +798,16 @@ components:
         pushed_at:
           type: string
           format: date-time
+        wrapped_dek:
+          type: string
+          format: byte
+          description: |
+            The caller's own DEK for this file, wrapped to their x25519 public
+            key (anonymous sealed box) and base64-encoded. Returned only on read
+            responses (GET /files, GET /files/{id}) and only when an authorising
+            wrapped_deks row exists for (file_id, caller); omitted otherwise.
+            Each caller sees only their own wrapped DEK, never another user's.
+          example: bmFjbGJveHdyYXBwZWRkZWs...
 
     ListedFileMeta:
       description: |

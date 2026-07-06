@@ -1,6 +1,7 @@
 package apiclient_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,8 @@ func TestListFilesSuccess(t *testing.T) {
 				"pushed_by": "usr_1",
 				"pushed_at": "2026-01-02T15:04:05Z",
 				"download_url": "https://blob.example/get?sig=1",
-				"download_expires_at": "2026-01-02T15:19:05Z"
+				"download_expires_at": "2026-01-02T15:19:05Z",
+				"wrapped_dek": "d3JhcHBlZC1kZWs="
 			}]
 		}`))
 	}))
@@ -70,6 +72,9 @@ func TestListFilesSuccess(t *testing.T) {
 	}
 	if f0.DownloadExpiresAt.IsZero() || f0.PushedAt.IsZero() {
 		t.Errorf("timestamps should be parsed, got %+v", f0)
+	}
+	if !bytes.Equal(f0.WrappedDEK, []byte("wrapped-dek")) {
+		t.Errorf("wrapped_dek = %q, want base64-decoded %q", f0.WrappedDEK, "wrapped-dek")
 	}
 }
 

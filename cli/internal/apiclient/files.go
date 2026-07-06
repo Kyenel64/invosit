@@ -26,6 +26,7 @@ type ListedFileMeta struct {
 	FileMeta
 	DownloadURL       string    `json:"download_url"`
 	DownloadExpiresAt time.Time `json:"download_expires_at"`
+	WrappedDEK        []byte    `json:"wrapped_dek"`
 }
 
 func (meta *FileMeta) normalize() {
