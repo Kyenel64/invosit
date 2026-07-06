@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -66,6 +67,12 @@ func (s *stubStorage) List(_ context.Context, _ string, _ func(storage.Object) e
 
 const validHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+var validWrappedDEK = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, wrappedDEKLen))
+
+func wrappedDEKsJSON(uid string) string {
+	return `[{"user_id":"` + uid + `","encrypted_dek":"` + validWrappedDEK + `"}]`
+}
+
 func pushCtx() context.Context {
 	ctx := httpx.WithUserID(context.Background(), "usr_abc")
 	ctx = httpx.WithWorkspaceID(ctx, "ws_abc")
@@ -82,11 +89,11 @@ func TestListFiles_Success(t *testing.T) {
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	wrappedDEK := []byte("wrapped-dek-for-caller")
-	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
+	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
 		WithArgs("env_abc", "usr_abc").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
 			AddRow("file_a", "a.env", validHash, int64(10), int64(1), "usr_abc", pushedAt, wrappedDEK).
-			AddRow("file_b", "b.env", validHash, int64(20), int64(4), "usr_xyz", pushedAt, nil))
+			AddRow("file_b", "b.env", validHash, int64(20), int64(4), "usr_xyz", pushedAt, wrappedDEK))
 
 	stub := &stubStorage{getURL: "https://signed/get"}
 	h := &Handler{db: db, blobs: stub}
@@ -123,13 +130,12 @@ func TestListFiles_Success(t *testing.T) {
 	if got.Files[0]["version"] != float64(1) {
 		t.Errorf("files[0] version = %v, want 1", got.Files[0]["version"])
 	}
-	// The caller's wrapped DEK is inlined when a wrapped_deks row exists, and
-	// the field is omitted entirely when it does not.
-	if got.Files[0]["wrapped_dek"] != base64.StdEncoding.EncodeToString(wrappedDEK) {
-		t.Errorf("files[0] wrapped_dek = %v, want base64 of caller DEK", got.Files[0]["wrapped_dek"])
-	}
-	if _, present := got.Files[1]["wrapped_dek"]; present {
-		t.Errorf("files[1] should omit wrapped_dek when the caller has no row")
+	// The INNER JOIN read path only returns files the caller holds a wrapped
+	// DEK for, so every listed file carries one.
+	for i, f := range got.Files {
+		if f["wrapped_dek"] != base64.StdEncoding.EncodeToString(wrappedDEK) {
+			t.Errorf("files[%d] wrapped_dek = %v, want base64 of caller DEK", i, f["wrapped_dek"])
+		}
 	}
 }
 
@@ -137,7 +143,7 @@ func TestListFiles_Empty(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
+	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
 		WithArgs("env_abc", "usr_abc").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}))
 
@@ -172,7 +178,7 @@ func TestGetFile_Success(t *testing.T) {
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	wrappedDEK := []byte("wrapped-dek-for-caller")
-	mock.ExpectQuery(`SELECT f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$3\s+WHERE f.id = \$1 AND f.environment_id = \$2`).
+	mock.ExpectQuery(`SELECT f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$3\s+WHERE f.id = \$1 AND f.environment_id = \$2`).
 		WithArgs("file_xyz", "env_abc", "usr_abc").
 		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
 			AddRow("a.env", validHash, int64(123), int64(2), "usr_abc", pushedAt, wrappedDEK))
@@ -209,34 +215,29 @@ func TestGetFile_Success(t *testing.T) {
 	}
 }
 
-// With the caller having no wrapped_deks row, the file is still returned (the
-// transitional read path) but wrapped_dek is omitted. The strict no-row-→-403
-// enforcement lands with the write path in a later iteration.
-func TestGetFile_NoWrappedDEKOmitsField(t *testing.T) {
+// With the caller holding no wrapped_deks row, the INNER JOIN yields no row
+// and the file is a 403 — indistinguishable from a nonexistent id, and no
+// signed URL is ever issued without an authorising DEK.
+func TestGetFile_NoDEKReturns403(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 
-	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
 	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
 		WithArgs("file_xyz", "env_abc", "usr_abc").
-		WillReturnRows(sqlmock.NewRows([]string{"path", "content_hash", "size", "version", "pushed_by", "pushed_at", "encrypted_dek"}).
-			AddRow("a.env", validHash, int64(123), int64(2), "usr_abc", pushedAt, nil))
+		WillReturnError(sql.ErrNoRows)
 
-	h := &Handler{db: db, blobs: &stubStorage{getURL: "https://signed/get"}}
+	stub := &stubStorage{getURL: "https://signed/get"}
+	h := &Handler{db: db, blobs: stub}
 	req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(pushCtx())
 	req.SetPathValue("fileId", "file_xyz")
 	rec := httptest.NewRecorder()
 	h.GetFile(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body = %s)", rec.Code, rec.Body.String())
 	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if _, present := got["wrapped_dek"]; present {
-		t.Errorf("wrapped_dek should be omitted when the caller has no row")
+	if stub.getCalls != 0 {
+		t.Errorf("getCalls = %d, want 0 (no DEK row must mean no signed URL)", stub.getCalls)
 	}
 }
 
@@ -348,14 +349,18 @@ func TestDeleteFile_MissingReturns403(t *testing.T) {
 // ── CreateFiles (Phase 1: insert into pending_files + signed PUT URL) ──
 
 // expectPendingInsert matches the advisory version pre-check followed by the
-// INSERT into pending_files that createOne issues for a new file (base 0, no
-// existing row). Argument is ignored — kept on the helper signature so existing
-// call sites read naturally.
+// transaction createOne runs for a new file (base 0, no existing row): INSERT
+// into pending_files plus the caller's pending_file_deks row. Argument is
+// ignored — kept on the helper signature so existing call sites read naturally.
 func expectPendingInsert(mock sqlmock.Sqlmock, _ string) {
 	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectBegin()
 	mock.ExpectExec(`INSERT INTO pending_files`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO pending_file_deks`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 }
 
 func TestCreateFiles_Success(t *testing.T) {
@@ -369,8 +374,8 @@ func TestCreateFiles_Success(t *testing.T) {
 	h := &Handler{db: db, blobs: stub}
 
 	body := `{"files":[
-		{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0},
-		{"path":"b.env","content_hash":"` + validHash + `","size":2,"base_version":0}
+		{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `},
+		{"path":"b.env","content_hash":"` + validHash + `","size":2,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}
 	]}`
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
 	rec := httptest.NewRecorder()
@@ -431,9 +436,9 @@ func TestCreateFiles_MixedSuccess(t *testing.T) {
 	h := &Handler{db: db, blobs: stub}
 
 	body := `{"files":[
-		{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0},
-		{"path":"../escape","content_hash":"` + validHash + `","size":2,"base_version":0},
-		{"path":"c.env","content_hash":"` + validHash + `","size":3,"base_version":0}
+		{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `},
+		{"path":"../escape","content_hash":"` + validHash + `","size":2,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `},
+		{"path":"c.env","content_hash":"` + validHash + `","size":3,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}
 	]}`
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
 	rec := httptest.NewRecorder()
@@ -618,7 +623,8 @@ func TestCreateFiles_StructurallyBadEntriesArePerEntry(t *testing.T) {
 			h := &Handler{db: db, blobs: &stubStorage{putURL: "https://signed/put"}}
 			body, _ := json.Marshal(map[string]any{
 				"files": []map[string]any{
-					{"path": "ok.env", "content_hash": validHash, "size": 1, "base_version": 0},
+					{"path": "ok.env", "content_hash": validHash, "size": 1, "base_version": 0,
+						"wrapped_deks": []map[string]any{{"user_id": "usr_abc", "encrypted_dek": bytes.Repeat([]byte{1}, wrappedDEKLen)}}},
 					badEntry,
 				},
 			})
@@ -649,11 +655,13 @@ func TestCreateFiles_InsertFailure(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectBegin()
 	mock.ExpectExec(`INSERT INTO pending_files`).
 		WillReturnError(errors.New("boom"))
+	mock.ExpectRollback()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
-	body := `{"files":[{"path":"a","content_hash":"` + validHash + `","size":1,"base_version":0}]}`
+	body := `{"files":[{"path":"a","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}]}`
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
 	rec := httptest.NewRecorder()
 	h.CreateFiles(rec, req)
@@ -677,7 +685,7 @@ func TestCreateFiles_PresignFailure(t *testing.T) {
 	expectPendingInsert(mock, "file_xyz")
 
 	h := &Handler{db: db, blobs: &stubStorage{putErr: errors.New("storage down")}}
-	body := `{"files":[{"path":"a","content_hash":"` + validHash + `","size":1,"base_version":0}]}`
+	body := `{"files":[{"path":"a","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}]}`
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
 	rec := httptest.NewRecorder()
 	h.CreateFiles(rec, req)
@@ -734,7 +742,7 @@ func TestCreateFiles_StaleBaseConflict(t *testing.T) {
 
 	stub := &stubStorage{putURL: "https://signed/put"}
 	h := &Handler{db: db, blobs: stub}
-	body := `{"files":[{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":2}]}`
+	body := `{"files":[{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":2,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}]}`
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
 	rec := httptest.NewRecorder()
 	h.CreateFiles(rec, req)
@@ -754,6 +762,88 @@ func TestCreateFiles_StaleBaseConflict(t *testing.T) {
 	}
 }
 
+// Every push entry must wrap the DEK for the caller — missing, foreign,
+// duplicate, or wrong-sized wrapped DEKs fail per-entry before any DB write.
+func TestCreateFiles_RejectsBadWrappedDEKs(t *testing.T) {
+	shortDEK := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, wrappedDEKLen-1))
+	cases := map[string]string{
+		"missing":             `[]`,
+		"foreign recipient":   `[{"user_id":"usr_other","encrypted_dek":"` + validWrappedDEK + `"}]`,
+		"duplicate recipient": `[{"user_id":"usr_abc","encrypted_dek":"` + validWrappedDEK + `"},{"user_id":"usr_abc","encrypted_dek":"` + validWrappedDEK + `"}]`,
+		"wrong length":        `[{"user_id":"usr_abc","encrypted_dek":"` + shortDEK + `"}]`,
+	}
+	for name, deks := range cases {
+		t.Run(name, func(t *testing.T) {
+			db, mock, _ := sqlmock.New()
+			defer db.Close()
+
+			stub := &stubStorage{putURL: "https://signed/put"}
+			h := &Handler{db: db, blobs: stub}
+			body := `{"files":[{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + deks + `}]}`
+			req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+			rec := httptest.NewRecorder()
+			h.CreateFiles(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body = %s)", rec.Code, rec.Body.String())
+			}
+			var got struct {
+				Results []map[string]any `json:"results"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &got)
+			if got.Results[0]["status"] != "error" || got.Results[0]["code"] != "INVALID_REQUEST" {
+				t.Errorf("result = %+v, want error/INVALID_REQUEST", got.Results[0])
+			}
+			if stub.putCalls != 0 {
+				t.Errorf("putCalls = %d, want 0 (bad wrapped deks skip presign)", stub.putCalls)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("no SQL expected: %v", err)
+			}
+		})
+	}
+}
+
+// A failure inserting the pending DEK rows rolls the pending file back too —
+// phase 1 never leaves a pending row without its wrapped DEKs.
+func TestCreateFiles_DEKInsertFailureRollsBack(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectBegin()
+	mock.ExpectExec(`INSERT INTO pending_files`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO pending_file_deks`).
+		WillReturnError(errors.New("boom"))
+	mock.ExpectRollback()
+
+	stub := &stubStorage{putURL: "https://signed/put"}
+	h := &Handler{db: db, blobs: stub}
+	body := `{"files":[{"path":"a.env","content_hash":"` + validHash + `","size":1,"base_version":0,"wrapped_deks":` + wrappedDEKsJSON("usr_abc") + `}]}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.CreateFiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body = %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Results []map[string]any `json:"results"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Results[0]["status"] != "error" || got.Results[0]["code"] != "INTERNAL_ERROR" {
+		t.Errorf("result = %+v, want error/INTERNAL_ERROR", got.Results[0])
+	}
+	if stub.putCalls != 0 {
+		t.Errorf("putCalls = %d, want 0", stub.putCalls)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
 // ── CompleteFiles (Phase 2: move pending_files row → files) ──
 
 const pendingSelectCols = `SELECT workspace_id, path, content_hash, size, pushed_by, pushed_at, completed_file_id, expected_version\s+FROM pending_files`
@@ -768,7 +858,7 @@ func pendingRow(path, hash string, completedFileID any, expectedVersion int64) *
 
 // expectCompleteCreate mocks completeOne committing a pending row as a NEW file
 // (base 0, no committed row): BEGIN → SELECT pending → SELECT current (none) →
-// INSERT files → mark pending completed → COMMIT.
+// INSERT files → move wrapped DEKs → mark pending completed → COMMIT.
 func expectCompleteCreate(mock sqlmock.Sqlmock, fileID, path, hash string) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(pendingSelectCols).WithArgs(fileID, "env_abc").WillReturnRows(pendingRow(path, hash, nil, 0))
@@ -777,6 +867,12 @@ func expectCompleteCreate(mock sqlmock.Sqlmock, fileID, path, hash string) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`INSERT INTO files`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(fileID))
+	mock.ExpectExec(`DELETE FROM wrapped_deks WHERE file_id = \$1`).
+		WithArgs(fileID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO wrapped_deks \(file_id, user_id, encrypted_dek\)\s+SELECT \$1, user_id, encrypted_dek FROM pending_file_deks WHERE pending_file_id = \$2`).
+		WithArgs(fileID, fileID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE pending_files SET completed_file_id = \$1 WHERE id = \$2`).
 		WithArgs(fileID, fileID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -785,8 +881,9 @@ func expectCompleteCreate(mock sqlmock.Sqlmock, fileID, path, hash string) {
 
 // expectCompleteUpdate mocks completeOne overwriting an existing file whose
 // committed version still matches the base: BEGIN → SELECT pending (base) →
-// SELECT current (row at base) → UPDATE files (version base+1) → mark pending
-// completed → COMMIT. committedID is the existing files row id (≠ pendingID).
+// SELECT current (row at base) → UPDATE files (version base+1) → move wrapped
+// DEKs (keyed by the COMMITTED id, pending id only as the copy source) → mark
+// pending completed → COMMIT. committedID is the existing files row id (≠ pendingID).
 func expectCompleteUpdate(mock sqlmock.Sqlmock, pendingID, committedID, path, hash string, base int64) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(pendingSelectCols).WithArgs(pendingID, "env_abc").WillReturnRows(pendingRow(path, hash, nil, base))
@@ -794,6 +891,12 @@ func expectCompleteUpdate(mock sqlmock.Sqlmock, pendingID, committedID, path, ha
 		WithArgs("env_abc", path).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}).AddRow(committedID, base))
 	mock.ExpectExec(`UPDATE files\s+SET content_hash`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM wrapped_deks WHERE file_id = \$1`).
+		WithArgs(committedID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO wrapped_deks \(file_id, user_id, encrypted_dek\)\s+SELECT \$1, user_id, encrypted_dek FROM pending_file_deks WHERE pending_file_id = \$2`).
+		WithArgs(committedID, pendingID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`UPDATE pending_files SET completed_file_id = \$1 WHERE id = \$2`).
 		WithArgs(committedID, pendingID).
@@ -1039,6 +1142,91 @@ func TestCompleteFiles_ConflictCreateRace(t *testing.T) {
 	mock.ExpectRollback()
 
 	assertCompleteConflict(t, &Handler{db: db, blobs: &stubStorage{}})
+}
+
+// A pending row with no pending_file_deks rows (pre-encryption leftover or a
+// bug) must not commit — a file nobody can decrypt would be invisible under
+// the INNER JOIN read path. The whole transaction rolls back.
+func TestCompleteFiles_MissingWrappedDEKsRollsBack(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(pendingSelectCols).WithArgs("file_new", "env_abc").WillReturnRows(pendingRow("a.env", validHash, nil, 0))
+	mock.ExpectQuery(`SELECT id, version FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "a.env").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`INSERT INTO files`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("file_new"))
+	mock.ExpectExec(`DELETE FROM wrapped_deks WHERE file_id = \$1`).
+		WithArgs("file_new").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO wrapped_deks`).
+		WithArgs("file_new", "file_new").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+
+	h := &Handler{db: db, blobs: &stubStorage{}}
+	body := `{"file_ids":["file_new"]}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.CompleteFiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Results []map[string]any `json:"results"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Results[0]["status"] != "error" || got.Results[0]["code"] != "INVALID_REQUEST" {
+		t.Errorf("result = %+v, want error/INVALID_REQUEST", got.Results[0])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
+}
+
+// files + wrapped_deks commit atomically: a failure moving the DEKs rolls
+// back the files write in the same transaction.
+func TestCompleteFiles_DEKMoveFailureRollsBack(t *testing.T) {
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(pendingSelectCols).WithArgs("file_new", "env_abc").WillReturnRows(pendingRow("a.env", validHash, nil, 2))
+	mock.ExpectQuery(`SELECT id, version FROM files WHERE environment_id = \$1 AND path = \$2 FOR UPDATE`).
+		WithArgs("env_abc", "a.env").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "version"}).AddRow("file_existing", int64(2)))
+	mock.ExpectExec(`UPDATE files\s+SET content_hash`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM wrapped_deks WHERE file_id = \$1`).
+		WithArgs("file_existing").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`INSERT INTO wrapped_deks`).
+		WithArgs("file_existing", "file_new").
+		WillReturnError(errors.New("boom"))
+	mock.ExpectRollback()
+
+	h := &Handler{db: db, blobs: &stubStorage{}}
+	body := `{"file_ids":["file_new"]}`
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)).WithContext(pushCtx())
+	rec := httptest.NewRecorder()
+	h.CompleteFiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Results []map[string]any `json:"results"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Results[0]["status"] != "error" || got.Results[0]["code"] != "INTERNAL_ERROR" {
+		t.Errorf("result = %+v, want error/INTERNAL_ERROR", got.Results[0])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Error(err)
+	}
 }
 
 func TestCompleteFiles_NotFoundReturnsForbidden(t *testing.T) {

@@ -65,6 +65,13 @@ CREATE TABLE pending_files (
 
 CREATE INDEX idx_pending_files_pushed_at ON pending_files (pushed_at);
 
+CREATE TABLE pending_file_deks (
+    pending_file_id TEXT  NOT NULL REFERENCES pending_files(id) ON DELETE CASCADE,
+    user_id         TEXT  NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+    encrypted_dek   BYTEA NOT NULL,
+    PRIMARY KEY (pending_file_id, user_id)
+);
+
 CREATE TABLE wrapped_deks (
     file_id       TEXT  NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     user_id       TEXT  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
