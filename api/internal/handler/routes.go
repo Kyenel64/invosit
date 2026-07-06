@@ -16,6 +16,7 @@ func AddRoutes(mux *http.ServeMux, h *Handler) {
 	// Auth
 	authed := middleware.RequireKratosSession(h.kratos, h.db)
 	mux.Handle("GET /api/v1/auth/me", authed(http.HandlerFunc(h.Me)))
+	mux.Handle("PUT /api/v1/auth/public-key", authed(http.HandlerFunc(h.RegisterPublicKey)))
 
 	mux.Handle("GET /api/v1/workspaces", authed(http.HandlerFunc(h.ListWorkspaces)))
 	mux.Handle("POST /api/v1/workspaces", authed(http.HandlerFunc(h.CreateWorkspace)))
