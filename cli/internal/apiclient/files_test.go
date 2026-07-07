@@ -146,12 +146,14 @@ func TestCreateFilesSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	wrappedDEK := bytes.Repeat([]byte{9}, 80)
 	c := apiclient.NewClient(srv.URL)
 	res, err := c.CreateFiles(context.Background(), "tok_xyz", "ws_1", "env_xyz", []apiclient.CreateFileEntry{{
 		Path:        "secret.env",
 		ContentHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Size:        12,
 		BaseVersion: 2,
+		WrappedDEKs: []apiclient.WrappedDEKEntry{{UserID: "usr_1", EncryptedDEK: wrappedDEK}},
 	}})
 	if err != nil {
 		t.Fatalf("CreateFiles: %v", err)
@@ -174,6 +176,12 @@ func TestCreateFilesSuccess(t *testing.T) {
 	}
 	if gotBody.Files[0].BaseVersion != 2 {
 		t.Errorf("base_version = %d, want 2 (sent as the push base)", gotBody.Files[0].BaseVersion)
+	}
+	// []byte round-trips as base64 through the JSON body.
+	if len(gotBody.Files[0].WrappedDEKs) != 1 ||
+		gotBody.Files[0].WrappedDEKs[0].UserID != "usr_1" ||
+		!bytes.Equal(gotBody.Files[0].WrappedDEKs[0].EncryptedDEK, wrappedDEK) {
+		t.Errorf("wrapped_deks roundtrip mismatch: %+v", gotBody.Files[0].WrappedDEKs)
 	}
 	if len(res) != 1 {
 		t.Fatalf("results = %d, want 1", len(res))
