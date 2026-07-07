@@ -1,8 +1,11 @@
 package apiclient_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,6 +104,81 @@ func TestMeTransportError(t *testing.T) {
 	_, err := c.Me(context.Background(), "tok")
 	if err == nil {
 		t.Fatal("want transport error, got nil")
+	}
+}
+
+func TestRegisterPublicKeySuccess(t *testing.T) {
+	var gotAuth, gotPath, gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	publicKey := bytes.Repeat([]byte{7}, 32)
+	c := apiclient.NewClient(srv.URL)
+	if err := c.RegisterPublicKey(context.Background(), "tok_xyz", publicKey); err != nil {
+		t.Fatalf("RegisterPublicKey: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %q, want PUT", gotMethod)
+	}
+	if gotPath != "/api/v1/auth/public-key" {
+		t.Errorf("path = %q, want /api/v1/auth/public-key", gotPath)
+	}
+	if gotAuth != "Bearer tok_xyz" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer tok_xyz")
+	}
+	want := `{"public_key":"` + base64.StdEncoding.EncodeToString(publicKey) + `"}`
+	if gotBody != want {
+		t.Errorf("body = %q, want %q", gotBody, want)
+	}
+}
+
+func TestRegisterPublicKeyUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	err := c.RegisterPublicKey(context.Background(), "bad_token", make([]byte, 32))
+	if !errors.Is(err, apiclient.ErrUnauthorized) {
+		t.Errorf("want ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestRegisterPublicKeyConflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	err := c.RegisterPublicKey(context.Background(), "tok", make([]byte, 32))
+	if !errors.Is(err, apiclient.ErrPublicKeyMismatch) {
+		t.Errorf("want ErrPublicKeyMismatch, got %v", err)
+	}
+}
+
+func TestRegisterPublicKeyUnexpectedStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := apiclient.NewClient(srv.URL)
+	err := c.RegisterPublicKey(context.Background(), "tok", make([]byte, 32))
+	if err == nil {
+		t.Fatal("want error on 500, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention status code, got %v", err)
 	}
 }
 
