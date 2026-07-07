@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/blob"
+	"github.com/kyenel64/invosit/cli/internal/filecrypt"
+	"github.com/kyenel64/invosit/cli/internal/keys"
 	"github.com/kyenel64/invosit/cli/internal/syncstate"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +36,11 @@ Uses the nearest .invosit.json file as project root.
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		creds, err := loadCredentials()
+		if err != nil {
+			return err
+		}
+
+		privateKey, err := loadPrivateKey(creds.UserID)
 		if err != nil {
 			return err
 		}
@@ -86,19 +94,25 @@ Uses the nearest .invosit.json file as project root.
 			}
 
 			record, hasRecord := state.Record(envName, file.Path)
-			base := syncstate.FileRecord{FileID: file.ID, Version: file.Version, ContentHash: file.ContentHash}
 
 			switch planPull(localHash, localExists, record, hasRecord, file, pullForceFlag) {
 			case pullDownload:
-				if err := pullOne(ctx, dest, file); err != nil {
+				plainHash, plainSize, err := pullOne(ctx, dest, file, privateKey)
+				if err != nil {
 					_, _ = fmt.Fprintf(stderr, "failed to pull %s: %v\n", file.Path, err)
 					failed++
 					continue
 				}
-				state.Put(envName, file.EnvironmentID, file.Path, base)
-				_, _ = fmt.Fprintf(stdout, "pulled %s (%d bytes)\n", file.Path, file.Size)
+				// The merge-base records the plaintext hash — the remote
+				// content_hash is the ciphertext hash and never matches disk.
+				state.Put(envName, file.EnvironmentID, file.Path, syncstate.FileRecord{
+					FileID:      file.ID,
+					Version:     file.Version,
+					ContentHash: plainHash,
+				})
+				_, _ = fmt.Fprintf(stdout, "pulled %s (%d bytes)\n", file.Path, plainSize)
 			case pullUpToDate:
-				state.Put(envName, file.EnvironmentID, file.Path, base)
+				state.Put(envName, file.EnvironmentID, file.Path, record)
 				_, _ = fmt.Fprintf(stdout, "up to date %s\n", file.Path)
 			case pullLocalOnly:
 				_, _ = fmt.Fprintf(stdout, "skipped %s (local changes, remote unchanged)\n", file.Path)
@@ -150,9 +164,7 @@ func planPull(localHash string, localExists bool, record syncstate.FileRecord, h
 		return pullDownload
 	case !localExists:
 		return pullDownload
-	case localHash == remote.ContentHash:
-		// M3 plaintext shortcut: at M4 the remote hash is ciphertext, so
-		// this row stops matching and the base comparisons below decide.
+	case hasRecord && remote.ID == record.FileID && remote.Version == record.Version && localHash == record.ContentHash:
 		return pullUpToDate
 	case hasRecord && localHash == record.ContentHash:
 		return pullDownload
@@ -188,46 +200,66 @@ func localFileHash(path string) (hash string, exists bool, err error) {
 	return hex.EncodeToString(sum[:]), true, nil
 }
 
-// pullOne downloads a single file, verifies its SHA-256 against the manifest
-// entry, and atomically writes it to dest. On any failure the existing local
-// file is left untouched.
-func pullOne(ctx context.Context, dest string, file apiclient.ListedFileMeta) error {
+// pullOne downloads a single file's ciphertext, verifies its SHA-256 against
+// the manifest entry, unwraps the DEK and decrypts, then atomically writes
+// the plaintext to dest. On any failure the existing local file is left
+// untouched. Returns the plaintext hash and size for the sync state.
+func pullOne(ctx context.Context, dest string, file apiclient.ListedFileMeta, privateKey []byte) (string, int64, error) {
+	if len(file.WrappedDEK) == 0 {
+		return "", 0, errors.New("no wrapped key returned for this file")
+	}
+
+	var cipherContent bytes.Buffer
+	hasher := sha256.New()
+	if err := blob.Download(ctx, file.DownloadURL, io.MultiWriter(&cipherContent, hasher)); err != nil {
+		return "", 0, fmt.Errorf("failed to download blob: %w", err)
+	}
+	if got := hex.EncodeToString(hasher.Sum(nil)); got != file.ContentHash {
+		return "", 0, errors.New("content hash mismatch: downloaded file is corrupt")
+	}
+
+	dek, err := keys.Unwrap(file.WrappedDEK, privateKey)
+	if err != nil {
+		if errors.Is(err, keys.ErrUnwrap) {
+			return "", 0, errors.New("failed to unwrap file key: wrong key for this machine? run `invosit login`")
+		}
+		return "", 0, fmt.Errorf("failed to unwrap file key: %w", err)
+	}
+	plaintext, err := filecrypt.Decrypt(dek, cipherContent.Bytes())
+	if err != nil {
+		if errors.Is(err, filecrypt.ErrDecrypt) {
+			return "", 0, errors.New("failed to decrypt: blob is corrupt or was tampered with")
+		}
+		return "", 0, fmt.Errorf("failed to decrypt: %w", err)
+	}
+
 	destDir := filepath.Dir(dest)
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+		return "", 0, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(destDir, ".invosit-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	cleanup := func() {
+
+	if _, err := tmp.Write(plaintext); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
+		return "", 0, fmt.Errorf("failed to write temp file: %w", err)
 	}
-
-	hasher := sha256.New()
-	if err := blob.Download(ctx, file.DownloadURL, io.MultiWriter(tmp, hasher)); err != nil {
-		cleanup()
-		return fmt.Errorf("failed to download blob: %w", err)
-	}
-
-	if got := hex.EncodeToString(hasher.Sum(nil)); got != file.ContentHash {
-		cleanup()
-		return errors.New("content hash mismatch: downloaded file is corrupt")
-	}
-
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to close temp file: %w", err)
+		return "", 0, fmt.Errorf("failed to close temp file: %w", err)
 	}
-
 	if err := os.Rename(tmpPath, dest); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to write file: %w", err)
+		return "", 0, fmt.Errorf("failed to write file: %w", err)
 	}
-	return nil
+
+	plainSum := sha256.Sum256(plaintext)
+	return hex.EncodeToString(plainSum[:]), int64(len(plaintext)), nil
 }
 
 // resolveWithinProject turns an API-reported project-relative path into an

@@ -33,8 +33,6 @@ var (
 	ErrUnwrap = errors.New("unwrap failed")
 )
 
-// Keypair is an x25519 keypair. Public is registered server-side; Private never
-// leaves the client.
 type Keypair struct {
 	Public  []byte
 	Private []byte
@@ -65,6 +63,18 @@ func Wrap(dek, recipientPublicKey []byte) ([]byte, error) {
 	return wrapped, nil
 }
 
+// PublicFromPrivate derives the x25519 public key matching privateKey.
+func PublicFromPrivate(privateKey []byte) ([]byte, error) {
+	if len(privateKey) != PrivateKeySize {
+		return nil, ErrInvalidPrivateKey
+	}
+	publicKey, err := curve25519.X25519(privateKey, curve25519.Basepoint)
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+	return publicKey, nil
+}
+
 // Unwrap opens an anonymous sealed box with privateKey. OpenAnonymous also needs
 // the recipient's public key, so it is derived from privateKey here, keeping the
 // signature to the private half the caller holds. Returns ErrUnwrap if the box
@@ -76,9 +86,9 @@ func Unwrap(wrappedDEK, privateKey []byte) ([]byte, error) {
 	if len(wrappedDEK) < wrappedOverhead {
 		return nil, ErrMalformedWrappedDEK
 	}
-	derivedPublic, err := curve25519.X25519(privateKey, curve25519.Basepoint)
+	derivedPublic, err := PublicFromPrivate(privateKey)
 	if err != nil {
-		return nil, fmt.Errorf("derive public key: %w", err)
+		return nil, err
 	}
 	var ownPublic, ownPrivate [32]byte
 	copy(ownPublic[:], derivedPublic)

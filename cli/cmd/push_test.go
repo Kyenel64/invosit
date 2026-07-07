@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
+	"github.com/kyenel64/invosit/cli/internal/filecrypt"
+	"github.com/kyenel64/invosit/cli/internal/keys"
 	"github.com/kyenel64/invosit/cli/internal/syncstate"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -50,9 +56,12 @@ func TestPlanPush(t *testing.T) {
 			want: pushPlan{skip: true},
 		},
 		{
-			name:      "no record but local matches remote adopts",
+			// The remote hash is ciphertext, so a matching local plaintext
+			// hash means nothing without a record — this must create (base 0)
+			// and surface the server CONFLICT, never silently adopt.
+			name:      "no record and local matches remote hash still creates",
 			localHash: remoteHash, remote: remote, hasRemote: true,
-			want: pushPlan{skip: true, adopt: true},
+			want: pushPlan{baseVersion: 0},
 		},
 		{
 			name:      "record but remote deleted recreates",
@@ -88,6 +97,83 @@ func TestPlanPush(t *testing.T) {
 				t.Errorf("planPush = %+v, want %+v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestEncryptPlanned(t *testing.T) {
+	keypair, err := keys.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	content := []byte("SECRET_TOKEN=hunter2\n")
+	sum := sha256.Sum256(content)
+	planned := []plannedFile{{
+		preparedFile: preparedFile{
+			projectRelPath: "app.env",
+			content:        content,
+			hash:           hex.EncodeToString(sum[:]),
+			size:           int64(len(content)),
+		},
+		baseVersion: 0,
+	}}
+
+	cmd := &cobra.Command{}
+	cmd.SetErr(&bytes.Buffer{})
+
+	encrypted, failed := encryptPlanned(cmd, planned, keypair.Public)
+	if failed != 0 || len(encrypted) != 1 {
+		t.Fatalf("failed = %d, len = %d, want 0/1", failed, len(encrypted))
+	}
+	file := encrypted[0]
+
+	if bytes.Contains(file.cipherContent, content) {
+		t.Error("ciphertext contains the plaintext")
+	}
+	if file.cipherHash == file.hash {
+		t.Error("ciphertext hash equals plaintext hash")
+	}
+	if file.cipherSize != int64(len(file.cipherContent)) {
+		t.Errorf("cipherSize = %d, want %d", file.cipherSize, len(file.cipherContent))
+	}
+
+	dek, err := keys.Unwrap(file.wrappedDEK, keypair.Private)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	plaintext, err := filecrypt.Decrypt(dek, file.cipherContent)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !bytes.Equal(plaintext, content) {
+		t.Error("round-trip mismatch")
+	}
+
+	// A fresh DEK and nonce per encryption: pushing identical plaintext twice
+	// must never produce the same ciphertext or blob key.
+	again, failedAgain := encryptPlanned(cmd, planned, keypair.Public)
+	if failedAgain != 0 || len(again) != 1 {
+		t.Fatalf("second encrypt failed = %d, len = %d", failedAgain, len(again))
+	}
+	if again[0].cipherHash == file.cipherHash {
+		t.Error("re-encrypting identical content produced an identical ciphertext hash")
+	}
+}
+
+func TestEncryptPlannedBadPublicKey(t *testing.T) {
+	planned := []plannedFile{{
+		preparedFile: preparedFile{projectRelPath: "app.env", content: []byte("x"), size: 1},
+	}}
+
+	var stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&stderr)
+
+	encrypted, failed := encryptPlanned(cmd, planned, []byte("short"))
+	if failed != 1 || len(encrypted) != 0 {
+		t.Fatalf("failed = %d, len = %d, want 1/0", failed, len(encrypted))
+	}
+	if !strings.Contains(stderr.String(), "failed to push app.env") {
+		t.Errorf("stderr = %q, want per-file failure line", stderr.String())
 	}
 }
 

@@ -149,14 +149,14 @@ func (s fileStatus) hint() string {
 }
 
 // classifyStatus is the read-only counterpart of planPull: the same three-way
-// compare in the same predicate order, minus the force arm.
+// compare in the same predicate order, minus the force arm. The remote
+// content_hash is the ciphertext hash, so only the record's plaintext
+// merge-base and the server version can decide.
 func classifyStatus(localHash string, localExists bool, record syncstate.FileRecord, hasRecord bool, remote apiclient.FileMeta) fileStatus {
 	switch {
 	case !localExists:
 		return statusMissing
-	case localHash == remote.ContentHash:
-		// M3 plaintext shortcut: at M4 the remote hash is ciphertext, so
-		// this row stops matching and the base comparisons below decide.
+	case hasRecord && remote.ID == record.FileID && remote.Version == record.Version && localHash == record.ContentHash:
 		return statusOK
 	case hasRecord && localHash == record.ContentHash:
 		return statusBehind

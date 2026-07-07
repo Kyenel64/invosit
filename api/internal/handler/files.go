@@ -19,6 +19,9 @@ const maxBatchSize = 100
 
 const conflictMessage = "version conflict: file changed since the base version"
 
+// 32-byte DEK + 48-byte x25519 anonymous-sealed-box overhead.
+const wrappedDEKLen = 80
+
 type fileMeta struct {
 	ID            string    `json:"id"`
 	EnvironmentID string    `json:"environment_id"`
@@ -33,11 +36,17 @@ type fileMeta struct {
 
 // --- Create Files ----------------------------------------------------------
 
+type wrappedDEKEntry struct {
+	UserID       string `json:"user_id"`
+	EncryptedDEK []byte `json:"encrypted_dek"` // never log these bytes.
+}
+
 type createFileRequest struct {
-	Path        string `json:"path"`
-	ContentHash string `json:"content_hash"`
-	Size        int64  `json:"size"`
-	BaseVersion *int64 `json:"base_version"`
+	Path        string            `json:"path"`
+	ContentHash string            `json:"content_hash"`
+	Size        int64             `json:"size"`
+	BaseVersion *int64            `json:"base_version"`
+	WrappedDEKs []wrappedDEKEntry `json:"wrapped_deks"`
 }
 
 type createFilesRequest struct {
@@ -112,6 +121,9 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 		return createErrorResult(path, "INVALID_REQUEST", "missing base version")
 	}
 	base := *entry.BaseVersion
+	if err := validateWrappedDEKs(entry.WrappedDEKs, uid); err != nil {
+		return createErrorResult(path, "INVALID_REQUEST", err.Error())
+	}
 
 	// Check version early incase theres an obvious conflict.
 	// We check version on completeOne() as well incase version changes between each call.
@@ -136,12 +148,35 @@ func (h *Handler) createOne(ctx context.Context, workspaceID, envID, uid string,
 	pushedAt := time.Now().UTC()
 	fileID := ids.File()
 
-	if _, err := h.db.ExecContext(ctx,
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("req=%s create_files_begin_failed err=%v", httpx.RequestID(ctx), err)
+		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pending_files (id, workspace_id, environment_id, path, content_hash, size, pushed_by, pushed_at, expected_version)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		fileID, workspaceID, envID, path, entry.ContentHash, entry.Size, uid, pushedAt, base,
 	); err != nil {
 		log.Printf("req=%s create_files_insert_failed err=%v", httpx.RequestID(ctx), err)
+		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
+	}
+
+	for _, dek := range entry.WrappedDEKs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO pending_file_deks (pending_file_id, user_id, encrypted_dek)
+			 VALUES ($1, $2, $3)`,
+			fileID, dek.UserID, dek.EncryptedDEK,
+		); err != nil {
+			log.Printf("req=%s create_files_dek_insert_failed err=%v", httpx.RequestID(ctx), err)
+			return createErrorResult(path, "INTERNAL_ERROR", "internal error")
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("req=%s create_files_commit_failed err=%v", httpx.RequestID(ctx), err)
 		return createErrorResult(path, "INTERNAL_ERROR", "internal error")
 	}
 
@@ -327,6 +362,32 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		}
 	}
 
+	// Move wrapped DEKs from pending to official.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM wrapped_deks WHERE file_id = $1`,
+		committedID,
+	); err != nil {
+		log.Printf("req=%s complete_files_dek_delete_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+	moveRes, err := tx.ExecContext(ctx,
+		`INSERT INTO wrapped_deks (file_id, user_id, encrypted_dek)
+		 SELECT $1, user_id, encrypted_dek FROM pending_file_deks WHERE pending_file_id = $2`,
+		committedID, fileID,
+	)
+	if err != nil {
+		log.Printf("req=%s complete_files_dek_move_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+	moved, err := moveRes.RowsAffected()
+	if err != nil {
+		log.Printf("req=%s complete_files_dek_move_rows_failed err=%v", httpx.RequestID(ctx), err)
+		return completeErrorResult(fileID, "INTERNAL_ERROR", "internal error")
+	}
+	if moved == 0 {
+		return completeErrorResult(fileID, "INVALID_REQUEST", "missing wrapped deks")
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pending_files SET completed_file_id = $1 WHERE id = $2`,
 		committedID, fileID,
@@ -426,7 +487,7 @@ func (h *Handler) ListFiles(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek
 		   FROM files f
-		   LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $2
+		   JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $2
 		  WHERE f.environment_id = $1
 		  ORDER BY f.path ASC`,
 		envID, uid,
@@ -505,7 +566,7 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek
 		   FROM files f
-		   LEFT JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $3
+		   JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = $3
 		  WHERE f.id = $1 AND f.environment_id = $2`,
 		fileID, envID, uid,
 	).Scan(&path, &hash, &size, &version, &pushedBy, &pushedAt, &wrappedDEK)
@@ -606,6 +667,26 @@ func validateFilePath(p string) error {
 			if seg == ".." {
 				return errors.New("path traversal")
 			}
+		}
+	}
+	return nil
+}
+
+func validateWrappedDEKs(entries []wrappedDEKEntry, uid string) error {
+	if len(entries) == 0 {
+		return errors.New("missing wrapped deks")
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.UserID != uid {
+			return errors.New("wrapped dek recipient must be the caller")
+		}
+		if _, dup := seen[entry.UserID]; dup {
+			return errors.New("duplicate wrapped dek recipient")
+		}
+		seen[entry.UserID] = struct{}{}
+		if len(entry.EncryptedDEK) != wrappedDEKLen {
+			return errors.New("invalid wrapped dek")
 		}
 	}
 	return nil

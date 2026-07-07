@@ -36,11 +36,17 @@ func (meta *FileMeta) normalize() {
 	meta.ContentHash = strings.ToLower(meta.ContentHash)
 }
 
+type WrappedDEKEntry struct {
+	UserID       string `json:"user_id"`
+	EncryptedDEK []byte `json:"encrypted_dek"`
+}
+
 type CreateFileEntry struct {
-	Path        string `json:"path"`
-	ContentHash string `json:"content_hash"`
-	Size        int64  `json:"size"`
-	BaseVersion int64  `json:"base_version"`
+	Path        string            `json:"path"`
+	ContentHash string            `json:"content_hash"`
+	Size        int64             `json:"size"`
+	BaseVersion int64             `json:"base_version"`
+	WrappedDEKs []WrappedDEKEntry `json:"wrapped_deks"`
 }
 
 type CreateFilesResult struct {

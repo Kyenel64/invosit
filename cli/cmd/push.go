@@ -13,6 +13,8 @@ import (
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
 	"github.com/kyenel64/invosit/cli/internal/blob"
+	"github.com/kyenel64/invosit/cli/internal/filecrypt"
+	"github.com/kyenel64/invosit/cli/internal/keys"
 	"github.com/kyenel64/invosit/cli/internal/syncstate"
 	"github.com/spf13/cobra"
 )
@@ -49,6 +51,15 @@ replaced content is permanently unrecoverable: invosit keeps no history.
 			return err
 		}
 
+		privateKey, err := loadPrivateKey(creds.UserID)
+		if err != nil {
+			return err
+		}
+		publicKey, err := keys.PublicFromPrivate(privateKey)
+		if err != nil {
+			return fmt.Errorf("failed to derive public key: %w", err)
+		}
+
 		cfg, projectRoot, err := loadProjectConfig()
 		if err != nil {
 			return err
@@ -70,10 +81,12 @@ replaced content is permanently unrecoverable: invosit keeps no history.
 
 		prepared, failed := prepareFiles(cmd, projectRoot, args)
 		planned := planFiles(cmd, dedupePrepared(prepared), envName, state, remote)
+		encrypted, encryptFailed := encryptPlanned(cmd, planned, publicKey)
+		failed += encryptFailed
 
-		for chunkStart := 0; chunkStart < len(planned); chunkStart += pushBatchLimit {
-			chunkEnd := min(chunkStart+pushBatchLimit, len(planned))
-			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, cfg.WorkspaceID, envName, planned[chunkStart:chunkEnd], state)
+		for chunkStart := 0; chunkStart < len(encrypted); chunkStart += pushBatchLimit {
+			chunkEnd := min(chunkStart+pushBatchLimit, len(encrypted))
+			batchFailed, err := pushBatch(cmd, apiClient, creds.SessionToken, creds.UserID, cfg.WorkspaceID, envName, encrypted[chunkStart:chunkEnd], state)
 			if err != nil {
 				saveSyncState(cmd.ErrOrStderr(), projectRoot, state)
 				return err
@@ -111,20 +124,17 @@ type plannedFile struct {
 type pushPlan struct {
 	baseVersion int64
 	skip        bool
-	adopt       bool
 }
 
 // planPush decides the base version for the server CAS, or to skip the file.
-// adopt marks a skip whose merge-base should still be recorded (the local
-// file already matches the remote, e.g. after an interrupted sync).
+// The remote content_hash is the ciphertext hash, so unchanged-ness is only
+// decidable against the sync-state record's plaintext merge-base.
 func planPush(localHash string, record syncstate.FileRecord, hasRecord bool, remote apiclient.FileMeta, hasRemote bool, force bool) pushPlan {
 	switch {
 	case force:
 		return pushPlan{baseVersion: remote.Version}
 	case hasRecord && localHash == record.ContentHash:
 		return pushPlan{skip: true}
-	case !hasRecord && hasRemote && localHash == remote.ContentHash:
-		return pushPlan{skip: true, adopt: true}
 	case hasRecord && !hasRemote:
 		return pushPlan{baseVersion: 0}
 	case hasRecord && remote.ID != record.FileID:
@@ -139,7 +149,7 @@ func planPush(localHash string, record syncstate.FileRecord, hasRecord bool, rem
 }
 
 // planFiles classifies each prepared file against the sync state and the
-// remote inventory, reporting and recording skips.
+// remote inventory, reporting skips.
 func planFiles(cmd *cobra.Command, prepared []preparedFile, envName string, state *syncstate.State, remote map[string]apiclient.FileMeta) []plannedFile {
 	stdout := cmd.OutOrStdout()
 	planned := make([]plannedFile, 0, len(prepared))
@@ -148,13 +158,6 @@ func planFiles(cmd *cobra.Command, prepared []preparedFile, envName string, stat
 		remoteMeta, hasRemote := remote[file.projectRelPath]
 		plan := planPush(file.hash, record, hasRecord, remoteMeta, hasRemote, pushForceFlag)
 		if plan.skip {
-			if plan.adopt {
-				state.Put(envName, remoteMeta.EnvironmentID, file.projectRelPath, syncstate.FileRecord{
-					FileID:      remoteMeta.ID,
-					Version:     remoteMeta.Version,
-					ContentHash: file.hash,
-				})
-			}
 			_, _ = fmt.Fprintf(stdout, "up to date %s\n", file.projectRelPath)
 			continue
 		}
@@ -230,9 +233,51 @@ func prepareFile(projectRoot, arg string) (preparedFile, error) {
 	}, nil
 }
 
+type encryptedFile struct {
+	plannedFile
+	cipherContent []byte
+	cipherHash    string
+	cipherSize    int64
+	wrappedDEK    []byte
+}
+
+// encryptPlanned seals each planned file with a fresh DEK and wraps the DEK
+// for the pusher. Failures are reported to stderr and dropped from the
+// returned slice so the rest of the batch can proceed.
+func encryptPlanned(cmd *cobra.Command, planned []plannedFile, publicKey []byte) ([]encryptedFile, int) {
+	stderr := cmd.ErrOrStderr()
+	encrypted := make([]encryptedFile, 0, len(planned))
+	failed := 0
+	for _, file := range planned {
+		dek, cipherContent, err := filecrypt.Encrypt(file.content)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: failed to encrypt: %v\n", file.projectRelPath, err)
+			failed++
+			continue
+		}
+		wrappedDEK, err := keys.Wrap(dek, publicKey)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to push %s: failed to wrap file key: %v\n", file.projectRelPath, err)
+			failed++
+			continue
+		}
+		sum := sha256.Sum256(cipherContent)
+		encrypted = append(encrypted, encryptedFile{
+			plannedFile:   file,
+			cipherContent: cipherContent,
+			cipherHash:    hex.EncodeToString(sum[:]),
+			cipherSize:    int64(len(cipherContent)),
+			wrappedDEK:    wrappedDEK,
+		})
+	}
+	return encrypted, failed
+}
+
 // pushBatch runs the 2-step file creation process.
 // create pending file metadata -> retrieve and post to s3 with signed url -> call :complete
-func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID, environment string, batch []plannedFile, state *syncstate.State) (int, error) {
+// The API sees only the ciphertext hash/size and the wrapped DEK; the sync
+// state keeps the plaintext hash as the merge-base.
+func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, userID, workspaceID, environment string, batch []encryptedFile, state *syncstate.State) (int, error) {
 	ctx := cmd.Context()
 	stdout := cmd.OutOrStdout()
 	stderr := cmd.ErrOrStderr()
@@ -241,9 +286,10 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 	for index, file := range batch {
 		entries[index] = apiclient.CreateFileEntry{
 			Path:        file.projectRelPath,
-			ContentHash: file.hash,
-			Size:        file.size,
+			ContentHash: file.cipherHash,
+			Size:        file.cipherSize,
 			BaseVersion: file.baseVersion,
+			WrappedDEKs: []apiclient.WrappedDEKEntry{{UserID: userID, EncryptedDEK: file.wrappedDEK}},
 		}
 	}
 
@@ -261,7 +307,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 	}
 
 	uploadedIDs := make([]string, 0, len(batch))
-	uploadedFiles := make([]plannedFile, 0, len(batch))
+	uploadedFiles := make([]encryptedFile, 0, len(batch))
 	failed := 0
 
 	for _, file := range batch {
@@ -277,7 +323,7 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 			continue
 		}
 
-		if err := uploadOne(ctx, file.preparedFile, result.UploadURL); err != nil {
+		if err := uploadOne(ctx, file, result.UploadURL); err != nil {
 			_, _ = fmt.Fprintf(stderr, "failed to push %s: %v\n", file.projectRelPath, err)
 			failed++
 			continue
@@ -324,8 +370,8 @@ func pushBatch(cmd *cobra.Command, client *apiclient.Client, token, workspaceID,
 	return failed, nil
 }
 
-func uploadOne(ctx context.Context, file preparedFile, signedURL string) error {
-	if err := blob.Upload(ctx, signedURL, bytes.NewReader(file.content), file.size); err != nil {
+func uploadOne(ctx context.Context, file encryptedFile, signedURL string) error {
+	if err := blob.Upload(ctx, signedURL, bytes.NewReader(file.cipherContent), file.cipherSize); err != nil {
 		return fmt.Errorf("failed to upload blob: %w", err)
 	}
 	return nil
