@@ -30,7 +30,7 @@ This repo (`github.com/kyenel64/invosit`) is a monorepo holding three product co
 | Component | Location | Status |
 |---|---|---|
 | **API server** | `api/` (Go) | shipping — most of this file describes it |
-| **CLI** | `cli/` (Go) | login + init shipped; push/pull and encryption planned (see "The CLI" section below) |
+| **CLI** | `cli/` (Go) | login, init, status, and encrypted push/pull shipped (see "The CLI" section below) |
 | **Frontend** | `frontend/` (Vite + React + TS) | basic Kratos login page shipped; dashboard features planned (see "The frontend" section below) |
 | **Documentation** | `docs/` | shared between all clients |
 
@@ -117,7 +117,7 @@ invosit/                          # monorepo root
 │   ├── go.sum
 │   ├── Dockerfile
 │   └── .golangci.yml
-├── cli/                          # Go CLI — login + init shipped; push/pull and encryption planned
+├── cli/                          # Go CLI — login, init, status, encrypted push/pull
 ├── frontend/                     # Vite + React + TS — basic Kratos login shipped
 ├── docs/
 │   └── openapi.yaml              # OpenAPI 3.0 spec — shared by API + CLI + frontend
@@ -245,6 +245,12 @@ wrapped_deks
   -- no row = no access, cryptographically enforced
   -- DELETE to revoke instantly, no re-encryption needed
 
+pending_file_deks
+  pending_file_id, user_id, encrypted_dek
+  -- wrapped DEKs sent at push phase 1, held alongside the pending_files
+  -- row; :complete moves them into wrapped_deks in the same transaction
+  -- that commits the file. Cascade-deleted with the pending row (sweep).
+
 access_grants
   id, user_id, workspace_id, environment_id,
   path_pattern, granted_by, granted_at
@@ -267,6 +273,7 @@ internal webhook.
 
 ```
 GET    /auth/me
+PUT    /auth/public-key   # register the caller's x25519 public key; 409 if a different key exists
 
 GET    /workspaces
 POST   /workspaces
@@ -317,6 +324,12 @@ Built on Cobra; structured the same way as the API server with thin
   for a session token via Kratos's `/sessions/token-exchange`.
   See `internal/kratos/browserlogin.go`; docs:
   https://www.ory.com/docs/kratos/social-signin/native-apps.
+  After sign-in, login ensures the user's long-term x25519 keypair exists
+  (generating one on first login) and registers the public half via
+  `PUT /auth/public-key` — "logged in" implies "wrappable recipient". A
+  409 (different key already registered, e.g. from another machine) warns
+  and continues; other registration failures fail the login before
+  credentials are saved. See `ensureKeypairRegistered` in `cmd/login.go`.
 - **`invosit user get`** — prints the local user id + email from the saved
   credentials.
 - **`invosit init`** — binds the current directory to a workspace via an
@@ -333,6 +346,26 @@ Built on Cobra; structured the same way as the API server with thin
   most-urgent-first with an action hint and a summary count line. Colors
   degrade to plain text when piped (grep-able). Exits 0 even with conflicts
   (informational); never writes files or sync state. See `cmd/status.go`.
+- **`invosit push <path>...`** — encrypted two-phase upload. Each file gets a
+  fresh DEK via `filecrypt.Encrypt` (AES-256-GCM); the DEK is wrapped to the
+  pusher's own public key (`keys.Wrap`, x25519 anonymous sealed box). Phase 1
+  sends the **ciphertext** hash/size plus the `wrapped_deks` bundle, phase 2
+  commits. Skip-if-unchanged is decided purely against the sync-state record's
+  plaintext merge-base — the remote `content_hash` is ciphertext and never
+  matches local plaintext (fresh nonce ⇒ re-encrypting identical content
+  yields a different hash, so no cross-push dedupe). `--force` overwrites
+  regardless of base version. See `cmd/push.go`.
+- **`invosit pull`** — downloads every tracked file's ciphertext via signed
+  URLs, verifies the ciphertext SHA-256, unwraps the caller's DEK from the
+  list response (`keys.Unwrap` + local private key), decrypts, and only then
+  atomically writes plaintext (temp + rename; failures never touch the local
+  file). The sync state records the **plaintext** hash as merge-base.
+  No-clobber: local-only edits are skipped, conflicts refuse without
+  `--force`. See `cmd/pull.go`.
+- **Key material at rest** — `keystore.FileStore` writes the private key to
+  `<user-config-dir>/invosit/keys/<user_id>.key` (0600 file in 0700 dir,
+  temp-then-rename, refuses group/other-readable files on load). The private
+  key never leaves the machine; logout keeps it. Rotation is out of scope.
 - **Credentials at rest** — `credstore.FileStore` writes
   `<user-config-dir>/invosit/credentials.json` at `0600` via a
   write-temp-then-rename atomic swap, and refuses to load files with
@@ -347,8 +380,9 @@ Built on Cobra; structured the same way as the API server with thin
   queried for the file inventory on every push/pull, so dashboard uploads
   and CLI pushes share one source of truth and the file *names* aren't
   leaked into git.
-- **API client** — `internal/apiclient` exposes `Me`, `GetWorkspaces`, and
-  `GetEnvironments` over Bearer-token auth.
+- **API client** — `internal/apiclient` exposes `Me`, `RegisterPublicKey`,
+  `GetWorkspaces`, `GetEnvironments`, `ListFiles`, `CreateFiles`, and
+  `CompleteFiles` over Bearer-token auth.
 
 The loopback port is fixed at `33405` and listed in `kratos.yml`'s
 `allowed_return_urls`. Kratos's URL matcher doesn't accept port wildcards,
@@ -361,10 +395,8 @@ login through the CLI is not a planned feature.
 
 ### Planned
 
-- **`invosit push` / `invosit pull`.** `push` uploads files: paths passed as args are uploaded directly (new files are created, existing files updated when the local SHA-256 differs from the API's). With no args, `push` queries the API for tracked files in the target environment, hashes locals, and re-uploads changed ones. `pull` queries the API for every tracked file and downloads them via signed URLs. Both accept `--env <name>`; when omitted they use the config's `defaultEnvironment` (and error if neither is set). The config is never the inventory — the API is. There is no separate `add` command — the API's `POST .../files` is an upsert, so `push` covers both creating and updating. Initial M3 iteration is unencrypted (see "Authorization — four layers" MVP status note).
-- **Encryption boundary.** All AES-256-GCM encryption/decryption of file contents happens here, not in the API. Generates per-file DEKs and wraps each with the recipient's public key (sourced from `users.public_key` via the API).
-- **Storage I/O.** Uploads/downloads encrypted blobs **directly** to the storage provider using short-lived signed URLs issued by the API. Bytes never pass through the API server.
-- **Local key material.** Generates and stores the user's keypair locally; the public key gets registered with the API on first run, the private key never leaves the machine.
+- **No-arg `invosit push`.** Queries the API for tracked files in the target environment, hashes locals against the sync state, and re-pushes changed ones (today paths must be passed as args).
+- **Multi-recipient wrapping.** Push currently wraps the DEK only for the uploader; access grants (M7) expand the recipient set using teammates' `users.public_key` values fetched via the API.
 
 ### Shared with the API
 
@@ -477,10 +509,11 @@ version it expects; `completeOne` rejects it with a per-item `CONFLICT` if the c
 version has moved on (no silent last-writer-wins). See #79; client sync-state and
 `invosit status` follow in #80/#81.
 
-**MVP status:** Layer 4 is not yet wired — file content is unencrypted in the
-M3 iteration (issue #11) so that the wire shape and storage plumbing can be
-validated end-to-end. Encryption + wrapped DEKs land in M4; until then layers
-1–3 are the only gate.
+**MVP status:** All four layers are wired (#15). Push carries ciphertext plus
+per-recipient wrapped DEKs; list/get INNER JOIN `wrapped_deks` on the caller,
+so a file with no wrapped DEK for the caller is excluded from lists, 403 on
+get, and never gets a signed URL. Wrapping currently targets only the
+uploader — access grants (M7) expand the recipient set.
 
 ### Rate limiting
 
