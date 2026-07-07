@@ -115,6 +115,37 @@ func TestWrapOutputShape(t *testing.T) {
 	}
 }
 
+func TestPublicFromPrivateMatchesGenerated(t *testing.T) {
+	keypair := mustGenerate(t)
+
+	derived, err := keys.PublicFromPrivate(keypair.Private)
+	if err != nil {
+		t.Fatalf("PublicFromPrivate: %v", err)
+	}
+	if !bytes.Equal(derived, keypair.Public) {
+		t.Error("derived public key differs from the generated one")
+	}
+
+	dek := randomBytes(t, 32)
+	wrapped := mustWrap(t, dek, derived)
+	out, err := keys.Unwrap(wrapped, keypair.Private)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	if !bytes.Equal(out, dek) {
+		t.Error("wrap to derived public key did not unwrap")
+	}
+}
+
+func TestPublicFromPrivateInvalidLength(t *testing.T) {
+	for _, size := range []int{0, 16, 31, 33} {
+		_, err := keys.PublicFromPrivate(make([]byte, size))
+		if !errors.Is(err, keys.ErrInvalidPrivateKey) {
+			t.Errorf("private key size %d: want ErrInvalidPrivateKey, got %v", size, err)
+		}
+	}
+}
+
 func TestUnwrapWrongKeyFails(t *testing.T) {
 	recipient := mustGenerate(t)
 	stranger := mustGenerate(t)
