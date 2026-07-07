@@ -1,13 +1,20 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kyenel64/invosit/cli/internal/apiclient"
+	"github.com/kyenel64/invosit/cli/internal/filecrypt"
+	"github.com/kyenel64/invosit/cli/internal/keys"
 	"github.com/kyenel64/invosit/cli/internal/syncstate"
 )
 
@@ -44,14 +51,21 @@ func TestPlanPull(t *testing.T) {
 			want:   pullDownload,
 		},
 		{
-			name:      "local matches remote is up to date",
-			localHash: remoteHash, localExists: true, remote: movedRemote,
+			name:      "unchanged both sides is up to date",
+			localHash: baseHash, localExists: true, record: record, hasRecord: true, remote: unmovedRemote,
 			want: pullUpToDate,
 		},
 		{
 			name:      "clean local fast-forwards",
 			localHash: baseHash, localExists: true, record: record, hasRecord: true, remote: movedRemote,
 			want: pullDownload,
+		},
+		{
+			// The remote hash is ciphertext — a local plaintext hash equal to
+			// it by coincidence must not read as up to date; the record decides.
+			name:      "local equals remote hash by coincidence still conflicts",
+			localHash: remoteHash, localExists: true, record: record, hasRecord: true, remote: movedRemote,
+			want: pullConflict,
 		},
 		{
 			name:      "local edit with unmoved remote is left alone",
@@ -73,6 +87,11 @@ func TestPlanPull(t *testing.T) {
 			localHash: editedHash, localExists: true, remote: movedRemote,
 			want: pullRefuse,
 		},
+		{
+			name:      "no sync state refuses even when local matches remote hash",
+			localHash: remoteHash, localExists: true, remote: movedRemote,
+			want: pullRefuse,
+		},
 	}
 
 	for _, test := range tests {
@@ -83,6 +102,156 @@ func TestPlanPull(t *testing.T) {
 			}
 		})
 	}
+}
+
+// encryptedFixture produces a real encrypted blob the way push does: fresh
+// DEK, AES-256-GCM ciphertext, DEK wrapped to the keypair.
+func encryptedFixture(t *testing.T, plaintext []byte) ([]byte, []byte, keys.Keypair) {
+	t.Helper()
+	keypair, err := keys.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dek, cipherContent, err := filecrypt.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	wrappedDEK, err := keys.Wrap(dek, keypair.Public)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	return cipherContent, wrappedDEK, keypair
+}
+
+func blobServer(t *testing.T, content []byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func listedBlob(url string, cipherContent, wrappedDEK []byte) apiclient.ListedFileMeta {
+	sum := sha256.Sum256(cipherContent)
+	return apiclient.ListedFileMeta{
+		FileMeta: apiclient.FileMeta{
+			ID:          "file_1",
+			Version:     1,
+			ContentHash: hex.EncodeToString(sum[:]),
+			Size:        int64(len(cipherContent)),
+		},
+		DownloadURL: url,
+		WrappedDEK:  wrappedDEK,
+	}
+}
+
+func TestPullOneRoundTrip(t *testing.T) {
+	plaintext := []byte("SECRET_TOKEN=hunter2\n")
+	cipherContent, wrappedDEK, keypair := encryptedFixture(t, plaintext)
+	srv := blobServer(t, cipherContent)
+	dest := filepath.Join(t.TempDir(), "app.env")
+
+	plainHash, plainSize, err := pullOne(context.Background(), dest, listedBlob(srv.URL, cipherContent, wrappedDEK), keypair.Private)
+	if err != nil {
+		t.Fatalf("pullOne: %v", err)
+	}
+
+	written, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.Equal(written, plaintext) {
+		t.Error("pulled bytes differ from the pushed plaintext")
+	}
+	sum := sha256.Sum256(plaintext)
+	if plainHash != hex.EncodeToString(sum[:]) {
+		t.Errorf("plainHash = %q, want plaintext hash", plainHash)
+	}
+	if plainSize != int64(len(plaintext)) {
+		t.Errorf("plainSize = %d, want %d", plainSize, len(plaintext))
+	}
+}
+
+func TestPullOneEmptyFileRoundTrip(t *testing.T) {
+	cipherContent, wrappedDEK, keypair := encryptedFixture(t, []byte{})
+	srv := blobServer(t, cipherContent)
+	dest := filepath.Join(t.TempDir(), "empty.env")
+
+	_, plainSize, err := pullOne(context.Background(), dest, listedBlob(srv.URL, cipherContent, wrappedDEK), keypair.Private)
+	if err != nil {
+		t.Fatalf("pullOne: %v", err)
+	}
+	if plainSize != 0 {
+		t.Errorf("plainSize = %d, want 0", plainSize)
+	}
+	written, err := os.ReadFile(dest)
+	if err != nil || len(written) != 0 {
+		t.Errorf("dest = %d bytes, err %v; want empty file", len(written), err)
+	}
+}
+
+// assertPullFails runs pullOne against a pre-existing dest and asserts the
+// failure leaves the local file untouched and no temp residue behind.
+func assertPullFails(t *testing.T, dest string, file apiclient.ListedFileMeta, privateKey []byte, wantErr string) {
+	t.Helper()
+	existing := []byte("existing local content")
+	if err := os.WriteFile(dest, existing, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, _, err := pullOne(context.Background(), dest, file, privateKey)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("pullOne err = %v, want containing %q", err, wantErr)
+	}
+
+	after, err := os.ReadFile(dest)
+	if err != nil || !bytes.Equal(after, existing) {
+		t.Errorf("local file changed on failed pull (err %v)", err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(dest), ".invosit-*.tmp"))
+	if err != nil || len(leftovers) != 0 {
+		t.Errorf("temp residue left behind: %v (err %v)", leftovers, err)
+	}
+}
+
+func TestPullOneTamperedCiphertextFails(t *testing.T) {
+	cipherContent, wrappedDEK, keypair := encryptedFixture(t, []byte("SECRET_TOKEN=hunter2\n"))
+	tampered := bytes.Clone(cipherContent)
+	tampered[len(tampered)/2] ^= 0xff
+	srv := blobServer(t, tampered)
+
+	// content_hash matches the tampered bytes, so the failure is GCM's.
+	dest := filepath.Join(t.TempDir(), "app.env")
+	assertPullFails(t, dest, listedBlob(srv.URL, tampered, wrappedDEK), keypair.Private, "failed to decrypt")
+}
+
+func TestPullOneHashMismatchFailsBeforeDecrypt(t *testing.T) {
+	cipherContent, wrappedDEK, keypair := encryptedFixture(t, []byte("SECRET_TOKEN=hunter2\n"))
+	srv := blobServer(t, append(bytes.Clone(cipherContent), 0x00))
+
+	dest := filepath.Join(t.TempDir(), "app.env")
+	assertPullFails(t, dest, listedBlob(srv.URL, cipherContent, wrappedDEK), keypair.Private, "content hash mismatch")
+}
+
+func TestPullOneWrongPrivateKeyFails(t *testing.T) {
+	cipherContent, wrappedDEK, _ := encryptedFixture(t, []byte("SECRET_TOKEN=hunter2\n"))
+	stranger, err := keys.Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	srv := blobServer(t, cipherContent)
+
+	dest := filepath.Join(t.TempDir(), "app.env")
+	assertPullFails(t, dest, listedBlob(srv.URL, cipherContent, wrappedDEK), stranger.Private, "failed to unwrap file key")
+}
+
+func TestPullOneMissingWrappedDEKFails(t *testing.T) {
+	cipherContent, _, keypair := encryptedFixture(t, []byte("SECRET_TOKEN=hunter2\n"))
+	srv := blobServer(t, cipherContent)
+
+	dest := filepath.Join(t.TempDir(), "app.env")
+	assertPullFails(t, dest, listedBlob(srv.URL, cipherContent, nil), keypair.Private, "no wrapped key")
 }
 
 func TestLocalFileHash(t *testing.T) {

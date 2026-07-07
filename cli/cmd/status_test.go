@@ -37,14 +37,21 @@ func TestClassifyStatus(t *testing.T) {
 			wantStatus: statusMissing, wantPull: pullDownload,
 		},
 		{
-			name:      "local matches remote is up to date",
-			localHash: remoteHash, localExists: true, remote: movedRemote,
+			name:      "unchanged both sides is up to date",
+			localHash: baseHash, localExists: true, record: record, hasRecord: true, remote: unmovedRemote,
 			wantStatus: statusOK, wantPull: pullUpToDate,
 		},
 		{
-			name:      "local matches remote despite stale record",
+			// The remote hash is ciphertext — a local plaintext hash equal to
+			// it by coincidence must not read as ok; the record decides.
+			name:      "local equals remote hash by coincidence still conflicts",
 			localHash: remoteHash, localExists: true, record: record, hasRecord: true, remote: movedRemote,
-			wantStatus: statusOK, wantPull: pullUpToDate,
+			wantStatus: statusConflict, wantPull: pullConflict,
+		},
+		{
+			name:      "no record and local equals remote hash diverges",
+			localHash: remoteHash, localExists: true, remote: movedRemote,
+			wantStatus: statusDiverged, wantPull: pullRefuse,
 		},
 		{
 			name:      "clean local with moved remote is behind",
