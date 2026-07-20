@@ -52,7 +52,10 @@ func TestMe_Returns200WithUser(t *testing.T) {
 }
 
 func TestMe_NoUserIDReturns401(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db}

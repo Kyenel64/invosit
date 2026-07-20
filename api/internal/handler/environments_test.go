@@ -23,7 +23,10 @@ func adminCtx() context.Context {
 }
 
 func TestCreateEnvironment_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`INSERT INTO environments`).
@@ -54,7 +57,10 @@ func TestCreateEnvironment_Success(t *testing.T) {
 func TestCreateEnvironment_NonAdminGets403(t *testing.T) {
 	for _, role := range []string{"member", "viewer"} {
 		t.Run(role, func(t *testing.T) {
-			db, _, _ := sqlmock.New()
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
 			defer db.Close()
 
 			h := &Handler{db: db}
@@ -72,30 +78,28 @@ func TestCreateEnvironment_NonAdminGets403(t *testing.T) {
 	}
 }
 
-func TestCreateEnvironment_MissingName(t *testing.T) {
-	db, _, _ := sqlmock.New()
-	defer db.Close()
-
-	h := &Handler{db: db}
-	req := httptest.NewRequest(http.MethodPost, "/x",
-		strings.NewReader(`{}`)).WithContext(adminCtx())
-	rec := httptest.NewRecorder()
-	h.CreateEnvironment(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+func TestCreateEnvironment_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"missing name", `{}`},
+		{"env_ prefixed", `{"name":"env_foo"}`},
+		{"env_ prefixed uppercase", `{"name":"Env_Bar"}`},
+		{"env_ prefixed with spaces", `{"name":"  env_baz  "}`},
 	}
-}
 
-func TestCreateEnvironment_RejectsEnvPrefixedName(t *testing.T) {
-	for _, name := range []string{"env_foo", "Env_Bar", "  env_baz  "} {
-		t.Run(name, func(t *testing.T) {
-			db, _, _ := sqlmock.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
 			defer db.Close()
 
 			h := &Handler{db: db}
 			req := httptest.NewRequest(http.MethodPost, "/x",
-				strings.NewReader(`{"name":"`+name+`"}`)).WithContext(adminCtx())
+				strings.NewReader(tt.body)).WithContext(adminCtx())
 			rec := httptest.NewRecorder()
 			h.CreateEnvironment(rec, req)
 
@@ -107,7 +111,10 @@ func TestCreateEnvironment_RejectsEnvPrefixedName(t *testing.T) {
 }
 
 func TestCreateEnvironment_DuplicateReturns409(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`INSERT INTO environments`).
@@ -125,7 +132,10 @@ func TestCreateEnvironment_DuplicateReturns409(t *testing.T) {
 }
 
 func TestListEnvironments_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	created := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
@@ -157,7 +167,10 @@ func TestListEnvironments_Success(t *testing.T) {
 }
 
 func TestListEnvironments_Empty(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id, name, created_at FROM environments`).

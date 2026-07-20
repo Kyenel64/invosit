@@ -64,7 +64,10 @@ func TestCreateWorkspace_Success(t *testing.T) {
 }
 
 func TestCreateWorkspace_TrimsName(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectBegin()
@@ -92,7 +95,10 @@ func TestCreateWorkspace_TrimsName(t *testing.T) {
 }
 
 func TestCreateWorkspace_NoUserID(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 	h := &Handler{db: db}
 
@@ -106,92 +112,97 @@ func TestCreateWorkspace_NoUserID(t *testing.T) {
 	}
 }
 
-func TestCreateWorkspace_MissingName(t *testing.T) {
-	db, _, _ := sqlmock.New()
-	defer db.Close()
-	h := &Handler{db: db}
+func TestCreateWorkspace_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		ctx  context.Context
+	}{
+		{"missing name", `{}`, httpx.WithUserID(context.Background(), "usr_abc")},
+		{"whitespace only name", `{"name":"   "}`, httpx.WithUserID(context.Background(), "usr_abc")},
+	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
-		strings.NewReader(`{}`))
-	req = req.WithContext(httpx.WithUserID(context.Background(), "usr_abc"))
-	rec := httptest.NewRecorder()
-	h.CreateWorkspace(rec, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			h := &Handler{db: db}
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
+				strings.NewReader(tt.body))
+			req = req.WithContext(tt.ctx)
+			rec := httptest.NewRecorder()
+			h.CreateWorkspace(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
 	}
 }
 
-func TestCreateWorkspace_WhitespaceOnlyName(t *testing.T) {
-	db, _, _ := sqlmock.New()
-	defer db.Close()
-	h := &Handler{db: db}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
-		strings.NewReader(`{"name":"   "}`))
-	req = req.WithContext(httpx.WithUserID(context.Background(), "usr_abc"))
-	rec := httptest.NewRecorder()
-	h.CreateWorkspace(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+func TestCreateWorkspace_TransactionErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		setupMock func(sqlmock.Sqlmock)
+	}{
+		{
+			"workspace insert failure",
+			func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectExec(`INSERT INTO workspaces`).
+					WillReturnError(errors.New("boom"))
+				mock.ExpectRollback()
+			},
+		},
+		{
+			"member insert failure",
+			func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				mock.ExpectExec(`INSERT INTO workspaces`).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec(`INSERT INTO workspace_members`).
+					WillReturnError(errors.New("boom"))
+				mock.ExpectRollback()
+			},
+		},
 	}
-}
 
-func TestCreateWorkspace_RollsBackOnInsertFailure(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
 
-	mock.ExpectBegin()
-	mock.ExpectExec(`INSERT INTO workspaces`).
-		WillReturnError(errors.New("boom"))
-	mock.ExpectRollback()
+			tt.setupMock(mock)
+			h := &Handler{db: db}
 
-	h := &Handler{db: db}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
+				strings.NewReader(`{"name":"x"}`))
+			req = req.WithContext(httpx.WithUserID(context.Background(), "usr_abc"))
+			rec := httptest.NewRecorder()
+			h.CreateWorkspace(rec, req)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
-		strings.NewReader(`{"name":"x"}`))
-	req = req.WithContext(httpx.WithUserID(context.Background(), "usr_abc"))
-	rec := httptest.NewRecorder()
-	h.CreateWorkspace(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rec.Code)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestCreateWorkspace_RollsBackOnMemberInsertFailure(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectExec(`INSERT INTO workspaces`).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`INSERT INTO workspace_members`).
-		WillReturnError(errors.New("boom"))
-	mock.ExpectRollback()
-
-	h := &Handler{db: db}
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces",
-		strings.NewReader(`{"name":"x"}`))
-	req = req.WithContext(httpx.WithUserID(context.Background(), "usr_abc"))
-	rec := httptest.NewRecorder()
-	h.CreateWorkspace(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rec.Code)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Error(err)
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want 500", rec.Code)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 
 func TestListWorkspaces_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	created := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
@@ -230,7 +241,10 @@ func TestListWorkspaces_Success(t *testing.T) {
 }
 
 func TestListWorkspaces_NoUserID(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 	h := &Handler{db: db}
 
@@ -244,7 +258,10 @@ func TestListWorkspaces_NoUserID(t *testing.T) {
 }
 
 func TestListWorkspaces_Empty(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT w\.id`).
@@ -273,7 +290,10 @@ func TestListWorkspaces_Empty(t *testing.T) {
 }
 
 func TestGetWorkspace_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	created := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
@@ -308,7 +328,10 @@ func TestGetWorkspace_Success(t *testing.T) {
 // the membership check and the row read. Treat as 403 (not 404) to keep
 // existence opaque.
 func TestGetWorkspace_ConcurrentDeleteReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT name, created_by, created_at FROM workspaces`).
@@ -329,7 +352,10 @@ func TestGetWorkspace_ConcurrentDeleteReturns403(t *testing.T) {
 }
 
 func TestDeleteWorkspace_AdminSucceeds(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`DELETE FROM workspaces WHERE id = \$1`).
@@ -355,9 +381,11 @@ func TestDeleteWorkspace_AdminSucceeds(t *testing.T) {
 func TestDeleteWorkspace_NonAdminGets403(t *testing.T) {
 	for _, role := range []string{"member", "viewer", "no_access"} {
 		t.Run(role, func(t *testing.T) {
-			db, mock, _ := sqlmock.New()
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
 			defer db.Close()
-			// No DB calls expected — admin check rejects before any query.
 
 			h := &Handler{db: db}
 			ctx := httpx.WithWorkspaceID(context.Background(), "ws_abc")
@@ -378,7 +406,10 @@ func TestDeleteWorkspace_NonAdminGets403(t *testing.T) {
 }
 
 func TestDeleteWorkspace_ConcurrentDeleteReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`DELETE FROM workspaces`).

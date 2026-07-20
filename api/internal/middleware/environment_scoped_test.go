@@ -14,7 +14,10 @@ import (
 )
 
 func TestEnvironmentScoped_OK(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM environments WHERE id = \$1 AND workspace_id = \$2`).
@@ -48,7 +51,10 @@ func TestEnvironmentScoped_OK(t *testing.T) {
 // A bare name (no env_ prefix) resolves by case-insensitive name lookup, and
 // the resolved env_ id is what reaches the handler context.
 func TestEnvironmentScoped_NameLookup_OK(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM environments WHERE LOWER\(name\) = LOWER\(\$1\) AND workspace_id = \$2`).
@@ -80,7 +86,10 @@ func TestEnvironmentScoped_NameLookup_OK(t *testing.T) {
 }
 
 func TestEnvironmentScoped_NameLookup_NotFound(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM environments WHERE LOWER\(name\)`).
@@ -104,7 +113,10 @@ func TestEnvironmentScoped_NameLookup_NotFound(t *testing.T) {
 }
 
 func TestEnvironmentScoped_NoWorkspaceIDInContext(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	called := false
@@ -126,7 +138,10 @@ func TestEnvironmentScoped_NoWorkspaceIDInContext(t *testing.T) {
 }
 
 func TestEnvironmentScoped_EmptyEnvIDReturnsForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := EnvironmentScoped(db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +162,10 @@ func TestEnvironmentScoped_EmptyEnvIDReturnsForbidden(t *testing.T) {
 // An env from a different workspace, or a nonexistent id, both surface as
 // sql.ErrNoRows from the WHERE filter — and share a single 403 path.
 func TestEnvironmentScoped_WrongWorkspaceReturnsForbidden(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM environments`).
@@ -171,7 +189,10 @@ func TestEnvironmentScoped_WrongWorkspaceReturnsForbidden(t *testing.T) {
 }
 
 func TestEnvironmentScoped_DBErrorReturns500(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM environments`).
