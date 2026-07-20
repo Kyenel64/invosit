@@ -800,6 +800,10 @@ components:
         joined_at:
           type: string
           format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Optional expiry time for membership (null = permanent)
 
     Environment:
       type: object
