@@ -257,8 +257,10 @@ access_grants
 
 audit_logs
   id, user_id, workspace_id, action, file_id, ip, timestamp
-  action: push | pull | login | logout | grant | revoke | delete
+  action: push | pull | login | logout | grant | revoke | delete | conflict | rollback
   -- user_id, workspace_id, file_id are nullable (login/logout has no workspace)
+  -- conflict: a push rejected by optimistic-concurrency CAS (INV-54); records
+  --   the user, workspace, and attempted file even though the push failed
 ```
 
 ### API routes

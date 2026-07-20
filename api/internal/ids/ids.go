@@ -22,3 +22,4 @@ func Token() string       { return New("tok") }
 func Workspace() string   { return New("ws") }
 func Environment() string { return New("env") }
 func File() string        { return New("file") }
+func AuditLog() string    { return New("log") }
