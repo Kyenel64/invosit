@@ -97,7 +97,7 @@ func (c *Client) ListFiles(ctx context.Context, token, workspaceID, environment 
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return nil, parseAPIError(res)
 	}
 }
 
@@ -139,7 +139,7 @@ func (c *Client) CreateFiles(ctx context.Context, token, workspaceID, environmen
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return nil, parseAPIError(res)
 	}
 }
 
@@ -181,6 +181,6 @@ func (c *Client) CompleteFiles(ctx context.Context, token, workspaceID, environm
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return nil, parseAPIError(res)
 	}
 }

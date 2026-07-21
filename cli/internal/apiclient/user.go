@@ -45,7 +45,7 @@ func (c *Client) Me(ctx context.Context, token string) (User, error) {
 	case http.StatusUnauthorized:
 		return User{}, ErrUnauthorized
 	default:
-		return User{}, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return User{}, parseAPIError(res)
 	}
 }
 
@@ -79,6 +79,6 @@ func (c *Client) RegisterPublicKey(ctx context.Context, token string, publicKey 
 	case http.StatusConflict:
 		return ErrPublicKeyMismatch
 	default:
-		return fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return parseAPIError(res)
 	}
 }
