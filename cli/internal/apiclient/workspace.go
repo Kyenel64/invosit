@@ -46,7 +46,7 @@ func (c *Client) CreateWorkspace(ctx context.Context, token, name string) (Works
 	case http.StatusUnauthorized:
 		return Workspace{}, ErrUnauthorized
 	default:
-		return Workspace{}, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return Workspace{}, parseAPIError(res)
 	}
 }
 
@@ -76,6 +76,6 @@ func (c *Client) GetWorkspaces(ctx context.Context, token string) ([]Workspace, 
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return nil, parseAPIError(res)
 	}
 }

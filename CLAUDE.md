@@ -381,8 +381,13 @@ Built on Cobra; structured the same way as the API server with thin
   and CLI pushes share one source of truth and the file *names* aren't
   leaked into git.
 - **API client** — `internal/apiclient` exposes `Me`, `RegisterPublicKey`,
-  `GetWorkspaces`, `GetEnvironments`, `ListFiles`, `CreateFiles`, and
-  `CompleteFiles` over Bearer-token auth.
+ `GetWorkspaces`, `GetEnvironments`, `ListFiles`, `CreateFiles`, and
+ `CompleteFiles` over Bearer-token auth. Non-2xx responses other than 401
+ decode the API's `{"error","code"}` envelope into a typed `*APIError`
+ (`errors.As` to branch on `Code`/`StatusCode`); bodies that aren't that
+ shape fall back to `unexpected status: <n>`. 401 stays the
+ `ErrUnauthorized` sentinel so commands keep printing the
+ "run `invosit login`" hint.
 
 The loopback port is fixed at `33405` and listed in `kratos.yml`'s
 `allowed_return_urls`. Kratos's URL matcher doesn't accept port wildcards,
