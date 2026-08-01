@@ -1,12 +1,9 @@
 package apiclient
 
 import (
-	"errors"
 	"net/http"
 	"time"
 )
-
-var ErrUnauthorized = errors.New("unauthorized")
 
 type Client struct {
 	baseURL    string

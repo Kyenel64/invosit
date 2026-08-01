@@ -44,7 +44,7 @@ func (c *Client) GetEnvironments(ctx context.Context, token string, workspaceID 
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
-		return nil, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return nil, parseAPIError(res)
 	}
 }
 
@@ -81,6 +81,6 @@ func (c *Client) CreateEnvironment(ctx context.Context, token, workspaceID, name
 	case http.StatusUnauthorized:
 		return Environment{}, ErrUnauthorized
 	default:
-		return Environment{}, fmt.Errorf("unexpected status: %d", res.StatusCode)
+		return Environment{}, parseAPIError(res)
 	}
 }
