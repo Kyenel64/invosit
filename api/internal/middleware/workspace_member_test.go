@@ -14,7 +14,10 @@ import (
 )
 
 func TestWorkspaceMember_NoUserID(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	called := false
@@ -36,7 +39,10 @@ func TestWorkspaceMember_NoUserID(t *testing.T) {
 }
 
 func TestWorkspaceMember_MemberOK(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT role\s+FROM workspace_members`).
@@ -82,7 +88,10 @@ func TestWorkspaceMember_MemberOK(t *testing.T) {
 // as sql.ErrNoRows from the query (filtered in the WHERE clause), so they
 // share a single 403 path through the middleware.
 func TestWorkspaceMember_NotAMemberReturnsForbidden(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT role\s+FROM workspace_members`).
@@ -109,7 +118,10 @@ func TestWorkspaceMember_NotAMemberReturnsForbidden(t *testing.T) {
 }
 
 func TestWorkspaceMember_EmptyWorkspaceIDReturnsForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	called := false
@@ -132,7 +144,10 @@ func TestWorkspaceMember_EmptyWorkspaceIDReturnsForbidden(t *testing.T) {
 }
 
 func TestWorkspaceMember_DBErrorReturns500(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT role\s+FROM workspace_members`).

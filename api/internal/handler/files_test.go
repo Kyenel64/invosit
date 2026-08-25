@@ -84,7 +84,10 @@ func pushCtx() context.Context {
 // ── ListFiles ───────────────────────────────
 
 func TestListFiles_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
@@ -140,7 +143,10 @@ func TestListFiles_Success(t *testing.T) {
 }
 
 func TestListFiles_Empty(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT f.id, f.path, f.content_hash, f.size, f.version, f.pushed_by, f.pushed_at, wd.encrypted_dek\s+FROM files f\s+JOIN wrapped_deks wd ON wd.file_id = f.id AND wd.user_id = \$2\s+WHERE f.environment_id = \$1`).
@@ -173,7 +179,10 @@ func TestListFiles_Empty(t *testing.T) {
 // ── GetFile ─────────────────────────────────
 
 func TestGetFile_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	pushedAt := time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC)
@@ -219,7 +228,10 @@ func TestGetFile_Success(t *testing.T) {
 // and the file is a 403 — indistinguishable from a nonexistent id, and no
 // signed URL is ever issued without an authorising DEK.
 func TestGetFile_NoDEKReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
@@ -245,7 +257,10 @@ func TestGetFile_NoDEKReturns403(t *testing.T) {
 // so GET /files/{id} returns 403 naturally — same response as a genuinely
 // unknown id. The caller can't tell whether an in-progress upload exists.
 func TestGetFile_PendingHiddenReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
@@ -264,7 +279,10 @@ func TestGetFile_PendingHiddenReturns403(t *testing.T) {
 }
 
 func TestGetFile_NotFoundReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT f.path, f.content_hash`).
@@ -285,7 +303,10 @@ func TestGetFile_NotFoundReturns403(t *testing.T) {
 // ── DeleteFile ──────────────────────────────
 
 func TestDeleteFile_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`DELETE FROM files WHERE id = \$1 AND environment_id = \$2`).
@@ -310,7 +331,10 @@ func TestDeleteFile_Success(t *testing.T) {
 }
 
 func TestDeleteFile_ViewerForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
@@ -328,7 +352,10 @@ func TestDeleteFile_ViewerForbidden(t *testing.T) {
 }
 
 func TestDeleteFile_MissingReturns403(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectExec(`DELETE FROM files WHERE id = \$1 AND environment_id = \$2`).
@@ -364,7 +391,10 @@ func expectPendingInsert(mock sqlmock.Sqlmock, _ string) {
 }
 
 func TestCreateFiles_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectPendingInsert(mock, "file_a")
@@ -424,7 +454,10 @@ func TestCreateFiles_Success(t *testing.T) {
 }
 
 func TestCreateFiles_MixedSuccess(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	// Bad path short-circuits before any DB call. Two valid entries reach
@@ -463,7 +496,10 @@ func TestCreateFiles_MixedSuccess(t *testing.T) {
 }
 
 func TestCreateFiles_OversizeBatch(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	entries := make([]string, 0, 101)
@@ -488,7 +524,10 @@ func TestCreateFiles_OversizeBatch(t *testing.T) {
 }
 
 func TestCreateFiles_ViewerForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	ctx := pushCtx()
@@ -506,7 +545,10 @@ func TestCreateFiles_ViewerForbidden(t *testing.T) {
 }
 
 func TestCreateFiles_EmptyBatch(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
@@ -521,7 +563,10 @@ func TestCreateFiles_EmptyBatch(t *testing.T) {
 }
 
 func TestCreateFiles_NoUserID(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
@@ -546,7 +591,10 @@ func TestCreateFiles_RejectsBadPaths(t *testing.T) {
 	}
 	for _, p := range bad {
 		t.Run(p, func(t *testing.T) {
-			db, _, _ := sqlmock.New()
+			db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 			defer db.Close()
 			h := &Handler{db: db, blobs: &stubStorage{}}
 
@@ -580,7 +628,10 @@ func TestCreateFiles_RejectsBadHashes(t *testing.T) {
 	}
 	for _, hash := range bad {
 		t.Run(hash, func(t *testing.T) {
-			db, _, _ := sqlmock.New()
+			db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 			defer db.Close()
 			h := &Handler{db: db, blobs: &stubStorage{}}
 
@@ -616,7 +667,10 @@ func TestCreateFiles_StructurallyBadEntriesArePerEntry(t *testing.T) {
 	}
 	for name, badEntry := range cases {
 		t.Run(name, func(t *testing.T) {
-			db, mock, _ := sqlmock.New()
+			db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 			defer db.Close()
 			expectPendingInsert(mock, "file_ok")
 
@@ -650,7 +704,10 @@ func TestCreateFiles_StructurallyBadEntriesArePerEntry(t *testing.T) {
 }
 
 func TestCreateFiles_InsertFailure(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
@@ -679,7 +736,10 @@ func TestCreateFiles_InsertFailure(t *testing.T) {
 }
 
 func TestCreateFiles_PresignFailure(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectPendingInsert(mock, "file_xyz")
@@ -705,7 +765,10 @@ func TestCreateFiles_PresignFailure(t *testing.T) {
 // A push entry without base_version is rejected per-entry — every push must
 // declare the version it is based on.
 func TestCreateFiles_MissingBaseVersion(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	stub := &stubStorage{putURL: "https://signed/put"}
@@ -733,7 +796,10 @@ func TestCreateFiles_MissingBaseVersion(t *testing.T) {
 // The advisory pre-check fails an obviously stale push before issuing a signed
 // URL: base_version no longer matches the committed file.
 func TestCreateFiles_StaleBaseConflict(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
@@ -774,7 +840,10 @@ func TestCreateFiles_RejectsBadWrappedDEKs(t *testing.T) {
 	}
 	for name, deks := range cases {
 		t.Run(name, func(t *testing.T) {
-			db, mock, _ := sqlmock.New()
+			db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 			defer db.Close()
 
 			stub := &stubStorage{putURL: "https://signed/put"}
@@ -807,7 +876,10 @@ func TestCreateFiles_RejectsBadWrappedDEKs(t *testing.T) {
 // A failure inserting the pending DEK rows rolls the pending file back too —
 // phase 1 never leaves a pending row without its wrapped DEKs.
 func TestCreateFiles_DEKInsertFailureRollsBack(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT version FROM files WHERE environment_id = \$1 AND path = \$2`).
@@ -935,7 +1007,10 @@ func expectCompleteRetry(mock sqlmock.Sqlmock, pendingID, committedID, path, has
 }
 
 func TestCompleteFiles_Success(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteCreate(mock, "file_a", "a.env", validHash)
@@ -977,7 +1052,10 @@ func TestCompleteFiles_Success(t *testing.T) {
 }
 
 func TestCompleteFiles_Idempotent(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteNoPending(mock, "file_xyz", "a.env", validHash, true)
@@ -1004,7 +1082,10 @@ func TestCompleteFiles_Idempotent(t *testing.T) {
 // upload (pending id != committed id) returns the committed file via the
 // soft-deleted pending row's completed_file_id pointer.
 func TestCompleteFiles_RetryAfterReplacement(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteRetry(mock, "file_new", "file_existing", "config/.env", validHash)
@@ -1037,7 +1118,10 @@ func TestCompleteFiles_RetryAfterReplacement(t *testing.T) {
 // Overwriting a file whose committed version still matches the base bumps the
 // version and returns the existing committed id.
 func TestCompleteFiles_UpdateBumpsVersion(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteUpdate(mock, "file_new", "file_existing", "a.env", validHash, 2)
@@ -1104,7 +1188,10 @@ func assertCompleteConflict(t *testing.T, h *Handler) {
 
 // Updating against a base the committed version has moved past → CONFLICT.
 func TestCompleteFiles_ConflictVersionMismatch(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 	expectCompleteConflict(mock, "file_new", "a.env", validHash, 2, 5)
 	assertCompleteConflict(t, &Handler{db: db, blobs: &stubStorage{}})
@@ -1112,7 +1199,10 @@ func TestCompleteFiles_ConflictVersionMismatch(t *testing.T) {
 
 // Updating a file that no longer exists (deleted out from under the base) → CONFLICT.
 func TestCompleteFiles_ConflictExpectedMissing(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 	expectCompleteConflict(mock, "file_new", "a.env", validHash, 2, -1)
 	assertCompleteConflict(t, &Handler{db: db, blobs: &stubStorage{}})
@@ -1120,7 +1210,10 @@ func TestCompleteFiles_ConflictExpectedMissing(t *testing.T) {
 
 // Creating (base 0) when a row already exists → CONFLICT.
 func TestCompleteFiles_ConflictCreateCollision(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 	expectCompleteConflict(mock, "file_new", "a.env", validHash, 0, 3)
 	assertCompleteConflict(t, &Handler{db: db, blobs: &stubStorage{}})
@@ -1129,7 +1222,10 @@ func TestCompleteFiles_ConflictCreateCollision(t *testing.T) {
 // Two concurrent creates of the same path: the second loses the unique-index
 // race on INSERT and is mapped to CONFLICT, not a 500.
 func TestCompleteFiles_ConflictCreateRace(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectBegin()
@@ -1148,7 +1244,10 @@ func TestCompleteFiles_ConflictCreateRace(t *testing.T) {
 // bug) must not commit — a file nobody can decrypt would be invisible under
 // the INNER JOIN read path. The whole transaction rolls back.
 func TestCompleteFiles_MissingWrappedDEKsRollsBack(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectBegin()
@@ -1190,7 +1289,10 @@ func TestCompleteFiles_MissingWrappedDEKsRollsBack(t *testing.T) {
 // files + wrapped_deks commit atomically: a failure moving the DEKs rolls
 // back the files write in the same transaction.
 func TestCompleteFiles_DEKMoveFailureRollsBack(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectBegin()
@@ -1230,7 +1332,10 @@ func TestCompleteFiles_DEKMoveFailureRollsBack(t *testing.T) {
 }
 
 func TestCompleteFiles_NotFoundReturnsForbidden(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteNoPending(mock, "file_missing", "", "", false)
@@ -1254,7 +1359,10 @@ func TestCompleteFiles_NotFoundReturnsForbidden(t *testing.T) {
 }
 
 func TestCompleteFiles_MixedSuccess(t *testing.T) {
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	expectCompleteCreate(mock, "file_a", "a.env", validHash)
@@ -1282,7 +1390,10 @@ func TestCompleteFiles_MixedSuccess(t *testing.T) {
 }
 
 func TestCompleteFiles_OversizeBatch(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	ids := make([]string, 0, 101)
@@ -1307,7 +1418,10 @@ func TestCompleteFiles_OversizeBatch(t *testing.T) {
 }
 
 func TestCompleteFiles_ViewerForbidden(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	ctx := pushCtx()
@@ -1325,7 +1439,10 @@ func TestCompleteFiles_ViewerForbidden(t *testing.T) {
 }
 
 func TestCompleteFiles_EmptyBatch(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}
@@ -1340,7 +1457,10 @@ func TestCompleteFiles_EmptyBatch(t *testing.T) {
 }
 
 func TestCompleteFiles_NoUserID(t *testing.T) {
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := &Handler{db: db, blobs: &stubStorage{}}

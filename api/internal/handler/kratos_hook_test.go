@@ -17,53 +17,51 @@ const (
 	validHookBody  = `{"identity_id":"` + hookIdentityID + `","email":"` + hookEmail + `","created_at":"` + hookCreatedAt + `"}`
 )
 
-func newHookHandler(t *testing.T) (*Handler, sqlmock.Sqlmock, func()) {
-	t.Helper()
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock: %v", err)
+func TestAfterRegistration_AuthErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+	}{
+		{"missing secret", ""},
+		{"wrong secret", "wrong"},
 	}
-	h := &Handler{db: db, webhookKey: hookSecret}
-	return h, mock, func() { db.Close() }
-}
 
-func TestAfterRegistration_RejectsMissingSecret(t *testing.T) {
-	h, _, cleanup := newHookHandler(t)
-	defer cleanup()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
-		bytes.NewReader([]byte(validHookBody)))
-	rec := httptest.NewRecorder()
-	h.AfterRegistration(rec, req)
+			h := &Handler{db: db, webhookKey: hookSecret}
+			req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
+				bytes.NewReader([]byte(validHookBody)))
+			if tt.secret != "" {
+				req.Header.Set("X-Kratos-Webhook-Secret", tt.secret)
+			}
+			rec := httptest.NewRecorder()
+			h.AfterRegistration(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
-	}
-}
-
-func TestAfterRegistration_RejectsWrongSecret(t *testing.T) {
-	h, _, cleanup := newHookHandler(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
-		bytes.NewReader([]byte(validHookBody)))
-	req.Header.Set("X-Kratos-Webhook-Secret", "wrong")
-	rec := httptest.NewRecorder()
-	h.AfterRegistration(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", rec.Code)
+			}
+		})
 	}
 }
 
 func TestAfterRegistration_InsertsUser(t *testing.T) {
-	h, mock, cleanup := newHookHandler(t)
-	defer cleanup()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
 
 	mock.ExpectExec(`INSERT INTO users`).
 		WithArgs(sqlmock.AnyArg(), hookEmail, hookIdentityID, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
+	h := &Handler{db: db, webhookKey: hookSecret}
 	req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
 		bytes.NewReader([]byte(validHookBody)))
 	req.Header.Set("X-Kratos-Webhook-Secret", hookSecret)
@@ -79,13 +77,16 @@ func TestAfterRegistration_InsertsUser(t *testing.T) {
 }
 
 func TestAfterRegistration_DuplicateIsIdempotent(t *testing.T) {
-	h, mock, cleanup := newHookHandler(t)
-	defer cleanup()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
 
-	// ON CONFLICT DO NOTHING — zero rows affected.
 	mock.ExpectExec(`INSERT INTO users`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
+	h := &Handler{db: db, webhookKey: hookSecret}
 	req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
 		bytes.NewReader([]byte(validHookBody)))
 	req.Header.Set("X-Kratos-Webhook-Secret", hookSecret)
@@ -98,9 +99,13 @@ func TestAfterRegistration_DuplicateIsIdempotent(t *testing.T) {
 }
 
 func TestAfterRegistration_InvalidPayload(t *testing.T) {
-	h, _, cleanup := newHookHandler(t)
-	defer cleanup()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
 
+	h := &Handler{db: db, webhookKey: hookSecret}
 	req := httptest.NewRequest(http.MethodPost, "/internal/hooks/kratos/after-registration",
 		bytes.NewReader([]byte(`{"identity_id":"not-a-uuid","email":"bad"}`)))
 	req.Header.Set("X-Kratos-Webhook-Secret", hookSecret)

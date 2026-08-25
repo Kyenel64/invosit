@@ -27,7 +27,10 @@ func newWhoamiServer(t *testing.T, status int, body string) *httptest.Server {
 
 func TestRequireKratosSession_MissingAuth(t *testing.T) {
 	c := kratos.NewClient("http://unused")
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	called := false
@@ -55,7 +58,10 @@ func TestRequireKratosSession_OK(t *testing.T) {
 	defer srv.Close()
 
 	c := kratos.NewClient(srv.URL)
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM users WHERE kratos_identity_id = \$1`).
@@ -92,7 +98,10 @@ func TestRequireKratosSession_NoLocalUser(t *testing.T) {
 	defer srv.Close()
 
 	c := kratos.NewClient(srv.URL)
-	db, mock, _ := sqlmock.New()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	mock.ExpectQuery(`SELECT id FROM users WHERE kratos_identity_id = \$1`).
@@ -118,7 +127,10 @@ func TestRequireKratosSession_KratosUnauthorized(t *testing.T) {
 	defer srv.Close()
 
 	c := kratos.NewClient(srv.URL)
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := RequireKratosSession(c, db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +155,10 @@ func TestRequireKratosSession_InactiveSession(t *testing.T) {
 	defer srv.Close()
 
 	c := kratos.NewClient(srv.URL)
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := RequireKratosSession(c, db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +180,10 @@ func TestRequireKratosSession_KratosError(t *testing.T) {
 	defer srv.Close()
 
 	c := kratos.NewClient(srv.URL)
-	db, _, _ := sqlmock.New()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
 	defer db.Close()
 
 	h := RequireKratosSession(c, db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

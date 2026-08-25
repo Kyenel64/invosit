@@ -89,51 +89,36 @@ func TestRegisterPublicKey_DifferentKeyReturns409(t *testing.T) {
 	}
 }
 
-func TestRegisterPublicKey_WrongLengthReturns400(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	h := &Handler{db: db}
-	rec := httptest.NewRecorder()
-	h.RegisterPublicKey(rec, registerPublicKeyReq(t, "usr_abc", map[string]any{"public_key": []byte("short")}))
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+func TestRegisterPublicKey_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name           string
+		userID         string
+		body           any
+		expectedStatus int
+	}{
+		{"wrong length", "usr_abc", map[string]any{"public_key": []byte("short")}, http.StatusBadRequest},
+		{"invalid base64", "usr_abc", map[string]any{"public_key": "not-base64!!"}, http.StatusBadRequest},
+		{"no user id", "", map[string]any{"public_key": make([]byte, 32)}, http.StatusUnauthorized},
 	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("no SQL expected: %v", err)
-	}
-}
 
-func TestRegisterPublicKey_InvalidBase64Returns400(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
 
-	h := &Handler{db: db}
-	rec := httptest.NewRecorder()
-	h.RegisterPublicKey(rec, registerPublicKeyReq(t, "usr_abc", map[string]any{"public_key": "not-base64!!"}))
+			h := &Handler{db: db}
+			rec := httptest.NewRecorder()
+			h.RegisterPublicKey(rec, registerPublicKeyReq(t, tt.userID, tt.body))
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("no SQL expected: %v", err)
-	}
-}
-
-func TestRegisterPublicKey_NoUserIDReturns401(t *testing.T) {
-	db, mock, _ := sqlmock.New()
-	defer db.Close()
-
-	key, _ := testPublicKey(t)
-	h := &Handler{db: db}
-	rec := httptest.NewRecorder()
-	h.RegisterPublicKey(rec, registerPublicKeyReq(t, "", map[string]any{"public_key": key}))
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("no SQL expected: %v", err)
+			if rec.Code != tt.expectedStatus {
+				t.Errorf("status = %d, want %d, body = %s", rec.Code, tt.expectedStatus, rec.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("no SQL expected: %v", err)
+			}
+		})
 	}
 }
