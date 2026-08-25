@@ -29,6 +29,8 @@ func AddRoutes(mux *http.ServeMux, h *Handler) {
 	mux.Handle("GET /api/v1/workspaces/{workspaceId}/environments", wsMember(http.HandlerFunc(h.ListEnvironments)))
 	mux.Handle("POST /api/v1/workspaces/{workspaceId}/environments", wsMember(http.HandlerFunc(h.CreateEnvironment)))
 
+	mux.Handle("GET /api/v1/workspaces/{workspaceId}/audit", wsMember(http.HandlerFunc(h.ListAuditLogs)))
+
 	// Auth + workspace verification + environment verification.
 	envScoped := middleware.Chain(authed, middleware.WorkspaceMember(h.db), middleware.EnvironmentScoped(h.db))
 	mux.Handle("POST   /api/v1/workspaces/{workspaceId}/environments/{environmentId}/files", envScoped(http.HandlerFunc(h.CreateFiles)))

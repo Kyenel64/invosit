@@ -15,6 +15,28 @@ import (
 	"github.com/lib/pq"
 )
 
+// recordAudit best-effort logs an audit event. Failures never abort the main action.
+func (h *Handler) recordAudit(ctx context.Context, action, workspaceID, fileID, userID, ip string) {
+	logID := ids.AuditLog()
+	timestamp := time.Now().UTC()
+
+	var fileIDArg any
+	if fileID == "" {
+		fileIDArg = nil
+	} else {
+		fileIDArg = fileID
+	}
+
+	_, err := h.db.ExecContext(ctx,
+		`INSERT INTO audit_logs (id, user_id, workspace_id, action, file_id, ip, timestamp)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		logID, userID, workspaceID, action, fileIDArg, ip, timestamp,
+	)
+	if err != nil {
+		log.Printf("req=%s audit_log_failed action=%s err=%v", httpx.RequestID(ctx), action, err)
+	}
+}
+
 const maxBatchSize = 100
 
 const conflictMessage = "version conflict: file changed since the base version"
@@ -259,13 +281,13 @@ func (h *Handler) CompleteFiles(w http.ResponseWriter, r *http.Request) {
 
 	results := make([]completeFilesResult, 0, len(req.FileIDs))
 	for _, fileID := range req.FileIDs {
-		results = append(results, h.completeOne(r.Context(), envID, fileID))
+		results = append(results, h.completeOneWithAudit(r, envID, fileID))
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, completeFilesResponse{Results: results})
 }
 
-func (h *Handler) completeOne(ctx context.Context, envID, fileID string) completeFilesResult {
+func (h *Handler) completeOne(ctx context.Context, envID, fileID, auditWorkspaceID, auditUserID, auditIP string) completeFilesResult {
 	if fileID == "" {
 		return completeErrorResult(fileID, "FORBIDDEN", "access denied")
 	}
@@ -329,6 +351,7 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 	switch base {
 	case 0: // expect absent → create
 		if fileExists {
+			h.recordAudit(ctx, "conflict", auditWorkspaceID, currentID, auditUserID, auditIP)
 			return completeErrorResult(fileID, "CONFLICT", conflictMessage)
 		}
 		newVersion = 1
@@ -340,6 +363,7 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		).Scan(&committedID); err != nil {
 			var pqErr *pq.Error
 			if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+				h.recordAudit(ctx, "conflict", auditWorkspaceID, fileID, auditUserID, auditIP)
 				return completeErrorResult(fileID, "CONFLICT", conflictMessage)
 			}
 			log.Printf("req=%s complete_files_insert_failed err=%v", httpx.RequestID(ctx), err)
@@ -347,6 +371,7 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 		}
 	default: // expect committed version == base → update
 		if !fileExists || currentVersion != base {
+			h.recordAudit(ctx, "conflict", auditWorkspaceID, currentID, auditUserID, auditIP)
 			return completeErrorResult(fileID, "CONFLICT", conflictMessage)
 		}
 		newVersion = currentVersion + 1
@@ -415,6 +440,19 @@ func (h *Handler) completeOne(ctx context.Context, envID, fileID string) complet
 			PushedAt:      pushedAt,
 		},
 	}
+}
+
+func (h *Handler) completeOneWithAudit(r *http.Request, envID, fileID string) completeFilesResult {
+	uid := httpx.UserID(r.Context())
+	workspaceID := httpx.WorkspaceID(r.Context())
+
+	result := h.completeOne(r.Context(), envID, fileID, workspaceID, uid, r.RemoteAddr)
+
+	if result.Status == "ok" {
+		h.recordAudit(r.Context(), "push", workspaceID, result.ID, uid, r.RemoteAddr)
+	}
+
+	return result
 }
 
 func (h *Handler) completeAlreadyDone(ctx context.Context, envID, fileID string) completeFilesResult {
@@ -585,6 +623,8 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.recordAudit(r.Context(), "pull", workspaceID, fileID, uid, r.RemoteAddr)
+
 	httpx.WriteJSON(w, http.StatusOK, listedFileMeta{
 		fileMeta: fileMeta{
 			ID:            fileID,
@@ -608,10 +648,12 @@ func (h *Handler) GetFile(w http.ResponseWriter, r *http.Request) {
 // Blob in S3 gets cleaned up separately when no other files reference the blob.
 // (Multiple files can reference the same blob if content is the same)
 func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
-	if httpx.UserID(r.Context()) == "" {
+	uid := httpx.UserID(r.Context())
+	if uid == "" {
 		httpx.RespondError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
 		return
 	}
+	workspaceID := httpx.WorkspaceID(r.Context())
 	envID := httpx.EnvironmentID(r.Context())
 	if httpx.WorkspaceRole(r.Context()) == "viewer" {
 		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "write permission required")
@@ -640,6 +682,8 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		httpx.RespondError(w, http.StatusForbidden, "FORBIDDEN", "access denied")
 		return
 	}
+
+	h.recordAudit(r.Context(), "delete", workspaceID, fileID, uid, r.RemoteAddr)
 
 	w.WriteHeader(http.StatusNoContent)
 }
