@@ -26,6 +26,10 @@ func AddRoutes(mux *http.ServeMux, h *Handler) {
 	mux.Handle("GET /api/v1/workspaces/{workspaceId}", wsMember(http.HandlerFunc(h.GetWorkspace)))
 	mux.Handle("DELETE /api/v1/workspaces/{workspaceId}", wsMember(http.HandlerFunc(h.DeleteWorkspace)))
 
+	mux.Handle("GET /api/v1/workspaces/{workspaceId}/members", wsMember(http.HandlerFunc(h.ListMembers)))
+	mux.Handle("POST /api/v1/workspaces/{workspaceId}/members", wsMember(http.HandlerFunc(h.AddMember)))
+	mux.Handle("DELETE /api/v1/workspaces/{workspaceId}/members/{userId}", wsMember(http.HandlerFunc(h.RemoveMember)))
+
 	mux.Handle("GET /api/v1/workspaces/{workspaceId}/environments", wsMember(http.HandlerFunc(h.ListEnvironments)))
 	mux.Handle("POST /api/v1/workspaces/{workspaceId}/environments", wsMember(http.HandlerFunc(h.CreateEnvironment)))
 
